@@ -9,25 +9,23 @@ is final.
 from __future__ import annotations
 
 import asyncio
-import logging
 import signal
 from contextlib import suppress
 from typing import NoReturn
 
-from wabot import __version__
 from wabot.infra.config import get_settings
+from wabot.infra.logging import configure_logging, get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def _run() -> None:
     settings = get_settings()
+    configure_logging(settings)
     logger.info(
-        "wabot.worker.start app=%s env=%s version=%s broker=%s",
-        settings.name,
-        settings.env,
-        __version__,
-        settings.broker_backend,
+        "wabot.worker.start",
+        broker=settings.broker_backend,
+        env=settings.env,
     )
     stop = asyncio.Event()
 
@@ -42,7 +40,6 @@ async def _run() -> None:
 
 
 def main() -> NoReturn:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     with suppress(KeyboardInterrupt):  # pragma: no cover
         asyncio.run(_run())
     raise SystemExit(0)

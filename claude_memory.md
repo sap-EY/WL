@@ -11,7 +11,7 @@
 | —    | Plan v1                                          | ✅ Done | Initial implementation_plan.md authored |
 | —    | Plan v2 (architecture review)                    | ✅ Done | Aligned with user feedback; companion files added |
 | 0    | Repository bootstrap                             | ✅ Done | pyproject, Dockerfile, compose, lint, /healthz, smoke tests |
-| 1    | Config, logging, correlation                     | 🟡 Partial | `infra/config.py` final; logging+correlation in next phase |
+| 1    | Config, logging, correlation                     | ✅ Done | structlog JSON + `X-Correlation-Id` middleware + stable error envelope wired |
 | 2    | DB models + Alembic                              | ✅ DDL applied (DBeaver); SQLAlchemy models pending | DDL applied via `models.txt`; ORM mapping next |
 | 3    | Interakt webhook ingestion                       | ⬜ Not started | |
 | 4    | Webhook normalizer + canonical event             | ⬜ Not started | |
@@ -34,8 +34,7 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 1. **User**: copy `.env.example` → `.env`, fill in `DB_PASSWORD`, `INTERAKT_API_KEY`, `INTERAKT_WEBHOOK_PATH_SECRET`.
 2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (smoke tests should pass).
 3. **User**: `docker compose build && docker compose up` → verify `http://127.0.0.1:8000/healthz` returns 200.
-4. Move into **Phase 1** (structlog JSON logging + correlation-id middleware + error envelope).
-5. Then **Phase 2** (SQLAlchemy ORM models mirroring `models.txt`, Alembic env, seed script).
+4. Move into **Phase 2** (SQLAlchemy ORM models mirroring `models.txt`, Alembic env, seed script).
 
 ---
 
@@ -56,6 +55,7 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 - **STOP / UNSUBSCRIBE** keywords handled at the router level → set consent declined.
 - **Stale historical button click handling** uses `callbackData` chain, not a time window.
 - **Registration form (v2.1)**: 7 fields, `#`-delimited single message, order = `Full Name#Speciality#Address#Email#City#State#Pincode`. `Full Name` is split on first whitespace into `first_name` and `last_name`. `doctor` table stores `first_name`, `last_name`, `speciality` (no `full_name`).
+- **Repository instruction policy**: `.github/instructions.md` is now the default instruction file and requires `claude_memory.md` updates for every code change or significant decision.
 
 ---
 
@@ -100,6 +100,22 @@ Append a dated entry whenever a phase moves forward. Keep entries short (what sh
   ```
 
 <!-- New entries go below this line. Newest first. -->
+
+### 2026-05-08 — Phase 1 complete (logging, correlation, error envelope)
+- Added `src/wabot/infra/logging.py`: structlog configured with `merge_contextvars`, `add_log_level`, ISO-8601 UTC timestamps with microseconds (`ts` key), `StackInfoRenderer`, `format_exc_info`, `UnicodeDecoder`. JSON output via `orjson` when `APP_LOG_JSON=true` (prod default), `dev.ConsoleRenderer` otherwise. Stdlib root logger bridged with one StreamHandler so uvicorn/gunicorn lines also flow through. `app`, `env`, `version` bound to contextvars at startup. Idempotent via `_CONFIGURED` guard.
+- Added `src/wabot/infra/correlation.py`: `CorrelationMiddleware` reads or mints `X-Correlation-Id` (UUID4), stores it on `request.state.correlation_id`, binds `correlation_id`/`method`/`path` via `structlog.contextvars.bind_contextvars`, resets the tokens in `finally`, and echoes the header on the response. Helpers `new_correlation_id()` and `get_current_correlation_id()`.
+- Added `src/wabot/infra/errors.py`: stable envelope `{"error":{"code","message","correlation_id","details"}}`. Typed exceptions `WabotError`, `ValidationFailedError` (400), `NotFoundError` (404), `ConflictError` (409), `DependencyUnavailableError` (503). Handlers registered for `WabotError`, `StarletteHTTPException`, `RequestValidationError`, and unhandled `Exception` (logged via `logger.exception`). HTTP status → code map covers 400/401/403/404/405/409/413/415/422/429 with fallback `http_<status>`. Used `typing.cast` for narrowing (no asserts → bandit B101 clean).
+- Wired into `src/wabot/main.py`: `configure_logging(settings)` runs in both `create_app` and `_lifespan`; `CorrelationMiddleware` and `register_exception_handlers` registered before route inclusion. Startup log is now structured: `wabot.startup db=… broker=… log_json=…`.
+- Updated `src/wabot/workers/inbound_worker.py` to use `configure_logging` + `get_logger`; removed stdlib `logging.basicConfig`.
+- Tests: `tests/unit/test_correlation.py` (auto-generated UUID echo, supplied header echo, distinct ids per request), `tests/unit/test_errors.py` (404 envelope shape + `not_found` code; 405 envelope shape + `method_not_allowed` code; correlation_id matches response header), `tests/unit/test_logging.py` (JSON output with `event`, `level`, `ts`, `app`, `env`, custom field).
+- Toolchain: pre-commit mypy hook gained `structlog==25.5.0` and `orjson==3.11.9` in `additional_dependencies`. Replaced two deprecated Starlette status names (`HTTP_413_REQUEST_ENTITY_TOO_LARGE` → `HTTP_413_CONTENT_TOO_LARGE`, `HTTP_422_UNPROCESSABLE_ENTITY` → `HTTP_422_UNPROCESSABLE_CONTENT`) — `pyproject.toml` keeps `filterwarnings = ["error"]`, so DeprecationWarnings break tests.
+- Validation: `pre-commit run --all-files` ✅ all hooks; `pytest -q` ✅ 10 passed.
+- Next: Phase 2 (SQLAlchemy ORM models mirroring `models.txt`, async engine, Alembic env, seed script).
+
+### 2026-05-08 — Repo instruction baseline added
+- Created `.github/instructions.md` with mandatory memory-management rules.
+- Locked process rule: every code change and major architecture decision must include a corresponding update in `claude_memory.md` without waiting for a user prompt.
+- This is intended to preserve continuity across model switches and keep progress/decisions synchronized.
 
 ### 2026-05-08 — Phase 0 complete (repo bootstrap)
 - Schema applied to Azure PG (`docbotdatabase.postgres.database.azure.com`, schema `wabot`, user `drbot_admin`) via DBeaver using `models.txt` + verified with `verify_schema.sql`.
