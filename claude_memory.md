@@ -12,7 +12,7 @@
 | —    | Plan v2 (architecture review)                    | ✅ Done | Aligned with user feedback; companion files added |
 | 0    | Repository bootstrap                             | ✅ Done | pyproject, Dockerfile, compose, lint, /healthz, smoke tests |
 | 1    | Config, logging, correlation                     | ✅ Done | structlog JSON + `X-Correlation-Id` middleware + stable error envelope wired |
-| 2    | DB models + Alembic                              | ✅ DDL applied (DBeaver); SQLAlchemy models pending | DDL applied via `models.txt`; ORM mapping next |
+| 2    | DB models + Alembic                              | ✅ Done | ORM mapped, Alembic env + idempotent `0001_init`, seed script, /readyz now pings DB |
 | 3    | Interakt webhook ingestion                       | ⬜ Not started | |
 | 4    | Webhook normalizer + canonical event             | ⬜ Not started | |
 | 5    | Orchestrator + per-user lock + free-text router  | ⬜ Not started | Use Redis `user:{full_phone}` snapshot |
@@ -34,7 +34,7 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 1. **User**: copy `.env.example` → `.env`, fill in `DB_PASSWORD`, `INTERAKT_API_KEY`, `INTERAKT_WEBHOOK_PATH_SECRET`.
 2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (smoke tests should pass).
 3. **User**: `docker compose build && docker compose up` → verify `http://127.0.0.1:8000/healthz` returns 200.
-4. Move into **Phase 2** (SQLAlchemy ORM models mirroring `models.txt`, Alembic env, seed script).
+4. Move into **Phase 3** (Interakt webhook ingestion: shared-secret URL, raw event persist + dedupe + enqueue, sub-100 ms ack).
 
 ---
 
@@ -100,6 +100,29 @@ Append a dated entry whenever a phase moves forward. Keep entries short (what sh
   ```
 
 <!-- New entries go below this line. Newest first. -->
+
+### 2026-05-08 — Phase 2 complete (data layer, Alembic, seed script)
+- **Data layer**: `src/wabot/data/base.py` (`Base(DeclarativeBase)` with `MetaData(schema="wabot", naming_convention=…)`); `src/wabot/data/db.py` (lazy async engine + sessionmaker singletons; `pool_pre_ping=True`, `pool_recycle=1800`, connect-event hook setting `search_path` and `statement_timeout`; `session_scope()` commit-on-success/rollback-on-error; FastAPI `get_session` dep; `ping(timeout_seconds=2.0)` using `asyncio.timeout`; `dispose_engine()`).
+- **Domain enums** (`src/wabot/domain/enums.py`): `JourneyType`, `RegistrationState`, `RegisteredState`, `ConsentStatus`, `MessageDirection`, `OutboundStatus`, `OutboundKind`, `ExpectedInputKind` — all `str` enums with values matching the DDL exactly.
+- **ORM models** (`src/wabot/data/models/*`): all 12 `wabot` tables mapped — `Doctor`, `Consent`, `ConsentHistory`, `WhatsappOnboardingStatus`, `JourneyState`, `JourneyStateHistory`, `ConversationSession`, `ConversationMessage`, `OutboundMessage`, `WebhookEventRaw`, `GenAIInteraction`, `RegistrationAttempt`, `PartialProfileConfirmation`. Postgres ENUMs are owned by SQL: SA helper `pg_enum()` uses `create_type=False`, `values_callable=lambda e: [m.value for m in e]`. `JourneyState` carries the `journey_state_consistency` `CheckConstraint`. `OutboundMessage.idempotency_key` unique; `OutboundMessage.callback_data` NOT NULL with `PENDING_SEND` default.
+- **Repositories** (`src/wabot/data/repositories/*`): `DoctorRepository` (`get_by_phone`, `create_shell`, `upsert_profile` setting `registration_completed_at` when `is_profile_complete` flips true, `patch`); `JourneyStateRepository` (`get_for_update()`, `upsert` bumps `version`, `append_history`); `OutboundMessageRepository` (insert via `pg_insert(...).on_conflict_do_nothing(["idempotency_key"])` + re-read; `mark_sent`, `mark_status` for DELIVERED/READ/FAILED/CLICKED); `WebhookEventRawRepository` (`record_if_new` returning `(row, is_new)` keyed off `(event_type, interakt_message_id, payload->'data'->'message'->>'message_status')`, `mark_processed`).
+- **Alembic**: `alembic.ini` (script_location=migrations, prepend_sys_path=src, no DB URL), `migrations/env.py` (online via `async_engine_from_config(..., poolclass=NullPool)`, `version_table_schema=WABOT_SCHEMA`, `_include_object` filters to `wabot` schema), `migrations/script.py.mako`, and **`migrations/versions/20260508_0001_init_init_schema.py`** — `revision="0001_init"`, `down_revision=None`. Because the schema was already applied via DBeaver, `upgrade()` runs `op.execute(_SCHEMA_DDL)` containing the full idempotent DDL from `models.txt` (CREATE SCHEMA / extension / 7 ENUMs in DO blocks / `wabot.set_updated_at()` function / 12 tables with `IF NOT EXISTS` + indexes + triggers, including `uq_webhook_event_dedupe` partial unique index). `downgrade()` drops all 12 tables CASCADE + the trigger function + 7 ENUM types.
+- **Seed script**: `scripts/seed_doctors.py` — CLI `python scripts/seed_doctors.py path/to/doctors.csv [--dry-run]`. Validates required columns, normalizes `full_phone_number` (digits-only, len ≥ 10), upserts via `DoctorRepository.upsert_profile`, returns `(inserted, updated)`. Calls `dispose_engine()` in `finally`.
+- **App wiring**:
+  - `src/wabot/api/routers/health.py`: `/readyz` now `await db_ping()`. On success → 200 with `dependencies={"db": True}`. On failure → 503 with `status="degraded"` and `dependencies={"db": False}`. `HealthResponse.dependencies: DependencyStatus | None`.
+  - `src/wabot/main.py`: lifespan now primes the engine on startup and `await dispose_engine()` on shutdown.
+  - `src/wabot/workers/inbound_worker.py`: same engine lifecycle in the worker.
+- **Tests**: 22 new assertions across `tests/unit/test_models.py` (12 tables registered, `wabot` schema, Doctor PK + phone uniqueness, `journey_state_consistency` constraint, ENUM column names + schema, OutboundMessage idempotency key, FK targets, webhook raw NOT NULLs), `tests/unit/test_db.py` (engine singleton caching, dispose clears singletons, `ping` returns False against unreachable DB without raising), `tests/unit/test_seed_doctors.py` (`_normalize_phone`, `_coerce_bool`, `_row_to_kwargs`). `tests/unit/test_health.py` extended with monkeypatched `/readyz` ok + 503 degraded paths.
+- **Test isolation**: `tests/conftest.py` now **forces** test env vars (overriding any developer `.env`) and clears `get_settings.cache_clear()` so the suite can never accidentally talk to the production Azure DB. Caught a bug where `setdefault` left the real DB config in place and the ping test opened a socket to Azure.
+- **Toolchain**: Added `pythonpath = ["src", "."]` to `[tool.pytest.ini_options]` so `tests/unit/test_seed_doctors.py` can import the script module. Removed the `WL-wabot-journey-flowchart-v1.png` exclude from `check-added-large-files` in `.pre-commit-config.yaml` (file no longer in the repo).
+- **Key decisions**:
+  - Initial migration uses `op.execute(...)` against the canonical idempotent DDL rather than autogenerated `op.create_table` calls — this is the single source of truth and stays safe to re-run on the already-provisioned Azure DB.
+  - SA ENUMs declared with `create_type=False` so Alembic never tries to create or drop them; lifecycle is owned entirely by the SQL DDL.
+  - `clock_timestamp()` + DB trigger `wabot.set_updated_at()` keep `updated_at` accurate without app-side bookkeeping; ORM models therefore omit `onupdate=`.
+  - `JourneyStateRepository.get_for_update` uses `with_for_update()` to align with the per-user lock contract from §8 of the plan.
+  - Outbound and webhook upserts go through `on_conflict_do_nothing` for race-safe idempotency.
+- **Validation**: `pre-commit run --all-files` ✅ all hooks (ruff/format/black/mypy/bandit/yaml/toml/large-files); `pytest -q` ✅ **32 passed**.
+- **Next**: Phase 3 — `POST /webhooks/interakt` with shared-secret URL, raw event persist via `WebhookEventRawRepository.record_if_new`, dedupe key `(event_type, interakt_message_id, message_status)`, broker enqueue, ≤100 ms ack, structured error envelope on auth failures.
 
 ### 2026-05-08 — Phase 1 complete (logging, correlation, error envelope)
 - Added `src/wabot/infra/logging.py`: structlog configured with `merge_contextvars`, `add_log_level`, ISO-8601 UTC timestamps with microseconds (`ts` key), `StackInfoRenderer`, `format_exc_info`, `UnicodeDecoder`. JSON output via `orjson` when `APP_LOG_JSON=true` (prod default), `dev.ConsoleRenderer` otherwise. Stdlib root logger bridged with one StreamHandler so uvicorn/gunicorn lines also flow through. `app`, `env`, `version` bound to contextvars at startup. Idempotent via `_CONFIGURED` guard.

@@ -92,6 +92,10 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "PL"]
 "scripts/**" = ["S", "PL"]
+# SA 2.0 `Mapped[uuid.UUID]` etc. require runtime imports of uuid/datetime,
+# so we keep them at module top-level here.
+"src/wabot/data/models/**" = ["TC001", "TC002", "TC003"]
+"src/wabot/data/repositories/**" = ["TC001", "TC002", "TC003"]
 
 [tool.black]
 line-length = 100
@@ -113,6 +117,7 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src", "."]
 addopts = "-ra --strict-markers --strict-config"
 filterwarnings = ["error"]
 

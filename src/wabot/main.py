@@ -20,6 +20,7 @@ from fastapi import FastAPI
 
 from wabot import __version__
 from wabot.api.routers import health
+from wabot.data.db import dispose_engine, get_engine
 from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.correlation import CorrelationMiddleware
 from wabot.infra.errors import register_exception_handlers
@@ -35,12 +36,13 @@ logger = get_logger(__name__)
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
 
-    Phase 1: configure logging and emit a structured startup event. Phase 2+
-    will open the DB engine, Redis pool, and HTTP clients here, and close
-    them on shutdown.
+    Configures logging, primes the async DB engine, and emits a
+    structured startup event. Disposes the engine on shutdown. Later
+    phases will open the Redis pool and HTTP clients here too.
     """
     settings: AppSettings = get_settings()
     configure_logging(settings)
+    get_engine(settings)
     logger.info(
         "wabot.startup",
         db=settings.db_dsn_for_logging,
@@ -50,6 +52,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await dispose_engine()
         logger.info("wabot.shutdown")
 
 

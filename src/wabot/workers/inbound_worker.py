@@ -13,6 +13,7 @@ import signal
 from contextlib import suppress
 from typing import NoReturn
 
+from wabot.data.db import dispose_engine, get_engine
 from wabot.infra.config import get_settings
 from wabot.infra.logging import configure_logging, get_logger
 
@@ -22,6 +23,7 @@ logger = get_logger(__name__)
 async def _run() -> None:
     settings = get_settings()
     configure_logging(settings)
+    get_engine(settings)
     logger.info(
         "wabot.worker.start",
         broker=settings.broker_backend,
@@ -35,8 +37,11 @@ async def _run() -> None:
             loop.add_signal_handler(sig, stop.set)
 
     # Phase 0: idle. Phase 5 will pull from the broker and dispatch.
-    await stop.wait()
-    logger.info("wabot.worker.stop")
+    try:
+        await stop.wait()
+    finally:
+        await dispose_engine()
+        logger.info("wabot.worker.stop")
 
 
 def main() -> NoReturn:

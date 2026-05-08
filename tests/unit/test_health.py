@@ -1,10 +1,11 @@
-"""Smoke tests for the Phase 0 health endpoints."""
+"""Smoke tests for the health endpoints."""
 
 from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from wabot.api.routers import health as health_module
 from wabot.main import app
 
 
@@ -24,10 +25,32 @@ async def test_healthz_ok() -> None:
 
 
 @pytest.mark.asyncio
-async def test_readyz_ok() -> None:
+async def test_readyz_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_ping() -> bool:
+        return True
+
+    monkeypatch.setattr(health_module, "db_ping", _fake_ping)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         resp = await client.get("/readyz")
 
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["dependencies"] == {"db": True}
+
+
+@pytest.mark.asyncio
+async def test_readyz_db_down_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_ping() -> bool:
+        return False
+
+    monkeypatch.setattr(health_module, "db_ping", _fake_ping)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.get("/readyz")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["dependencies"] == {"db": False}
