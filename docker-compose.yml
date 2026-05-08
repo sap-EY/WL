@@ -1,0 +1,78 @@
+# =============================================================================
+# Wockhardt WhatsApp Bot — local docker-compose
+# Default profile: api + worker + redis (Postgres lives on Azure; we connect to it).
+# Optional profile `local-db` adds a local Postgres for fully offline work.
+# =============================================================================
+
+name: wabot
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: wabot:dev
+    container_name: wabot-api
+    env_file: .env
+    environment:
+      APP_ENV: local
+    ports:
+      - "${APP_HTTP_PORT:-8000}:8000"
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["/app/docker/entrypoints/api.sh"]
+
+  worker:
+    image: wabot:dev
+    container_name: wabot-worker
+    env_file: .env
+    environment:
+      APP_ENV: local
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["/app/docker/entrypoints/worker.sh"]
+
+  redis:
+    image: redis:7.4.9-alpine
+    container_name: wabot-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
+
+  # Optional: only used when offline. Activate with:
+  #   docker compose --profile local-db up
+  postgres:
+    profiles: ["local-db"]
+    image: postgres:16.13-alpine
+    container_name: wabot-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

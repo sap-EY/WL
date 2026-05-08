@@ -1,0 +1,141 @@
+START
+  |
+  v
+Any free-text input received on Interakt webhook
+  |
+  +--> Input may be QR/click-to-chat initiated REGISTER_WL
+  |
+  +--> Input may be any other free-text input (hi / hello / register me / help / etc.)
+  |
+  v
+Lookup phone-number in client/master data
+  |
+  +--> [Phone-number NOT found]
+  |         |
+  |         v
+  |   Create new internal DB record
+  |         |
+  |         v
+  |   Send full user-registration message
+  |         |
+  |         v
+  |   User sends registration data
+  |         |
+  |         +--> Allow max 2 retries for invalid format
+  |         |
+  |         v
+  |   Update user details in DB
+  |         |
+  |         v
+  |   Registration completed
+  |         |
+  |         v
+  |   Initiate registered_users journey by sending consent template
+  |
+  +--> [Phone-number found]
+            |
+            v
+    Is user completely registered?
+            |
+            +--> [No]
+            |         |
+            |         v
+            |   Fetch available partial user data from master
+            |         |
+            |         v
+            |   Send confirmation message with Yes / No buttons
+            |         |
+            |         +--> [User selects Yes]
+            |         |         |
+            |         |         v
+            |         |   Ask user to send remaining/pending data
+            |         |         |
+            |         |         v
+            |         |   User sends remaining data
+            |         |         |
+            |         |         +--> Allow max 2 retries
+            |         |         |
+            |         |         v
+            |         |   Update user record with remaining data
+            |         |         |
+            |         |         v
+            |         |   Registration completed
+            |         |         |
+            |         |         v
+            |         |   Initiate registered_users journey by sending consent template
+            |         |
+            |         +--> [User selects No]
+            |                   |
+            |                   v
+            |             Ask user to send all correct details
+            |                   |
+            |                   v
+            |             User sends corrected full data
+            |                   |
+            |                   +--> Allow max 2 retries
+            |                   |
+            |                   v
+            |             Update user record with corrected data
+            |                   |
+            |                   v
+            |             Registration completed
+            |                   |
+            |                   v
+            |             Initiate registered_users journey by sending consent template
+            |
+            +--> [Yes]
+                      |
+                      v
+                Is user already onboarded in WhatsApp journey?
+                      |
+                      +--> [No]
+                      |         |
+                      |         v
+                      |   Set first-message / onboard flag = true
+                      |         |
+                      |         v
+                      |   Send consent + welcome/start-chat flow
+                      |
+                      +--> [Yes]
+                                |
+                                v
+                          Send user's free-text message to GenAI layer
+                                |
+                                v
+                     Decision agent checks:
+                     Does this query require scientific/RAG answer?
+                                |
+                   +------------+-------------+
+                   |                          |
+                 [No]                       [Yes]
+                   |                          |
+                   v                          v
+       Send simple text conversational   Send acknowledgement:
+       reply from GenAI                  “Please wait…”
+                   |                          |
+                   |                          v
+                   |              RAG engine generates scientific answer
+                   |                          |
+                   |                          v
+                   |              Send text-only scientific answer with buttons:
+                   |                1. Satisfied
+                   |                2. Call hotline
+                   |                          |
+                   |          +---------------+-------------------+
+                   |          |               |                   |
+                   |      [Satisfied]   [Call hotline]   [User sends next free-text]
+                   |          |               |                   |
+                   |          v               v                   |
+                   |   Send thank-you   Send hotline             |
+                   |   acknowledgement  acknowledgement/template |
+                   |          |               |                  |
+                   |          v               v                  |
+                   |   Flow for this     User clicks hotline CTA|
+                   |   response ends     Dialer opens            |
+                   |                                         loop back
+                   +----------------------------------------------->
+
+Global rule:
+- Consent decline is only a soft halt.
+- Future user free-text or future consent follow-up campaign may re-enter the flow.
+``

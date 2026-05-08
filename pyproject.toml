@@ -1,0 +1,124 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wabot"
+version = "0.1.0"
+description = "Wockhardt LifeSciences WhatsApp orchestration bot (Interakt + GenAI + RAG)."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Proprietary" }
+authors = [{ name = "Wockhardt Engineering" }]
+
+dependencies = [
+    # Web
+    "fastapi==0.136.1",
+    "uvicorn[standard]==0.46.0",
+    "gunicorn==26.0.0",
+    "python-multipart==0.0.27",
+    # Validation / config
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.0",
+    # DB
+    "sqlalchemy[asyncio]==2.0.49",
+    "asyncpg==0.31.0",
+    "alembic==1.18.4",
+    "greenlet==3.5.0",
+    # Cache
+    "redis==7.4.0",
+    # HTTP
+    "httpx==0.28.1",
+    "tenacity==9.1.4",
+    # Observability
+    "structlog==25.5.0",
+    "orjson==3.11.9",
+    # Time
+    "python-dateutil==2.9.0.post0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.3",
+    "pytest-asyncio==1.3.0",
+    "pytest-cov==7.1.0",
+    "respx==0.23.1",
+    "hypothesis==6.152.4",
+    "ruff==0.15.12",
+    "black==26.3.1",
+    "mypy==2.0.0",
+    "types-python-dateutil==2.9.0.20260508",
+    "bandit==1.9.4",
+    "pip-audit==2.10.0",
+    "pre-commit==4.6.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+wabot = ["py.typed"]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "ASYNC",         # async best practices
+    "S",             # bandit
+    "RUF",           # ruff-specific
+    "PL",            # pylint
+    "SIM",           # simplify
+    "TCH",           # type-checking imports
+    "PTH",           # use pathlib
+]
+ignore = [
+    "PLR0913",       # too many args (FastAPI deps)
+    "S101",          # assert (tests)
+    "S104",          # bind to 0.0.0.0 (we do, intentionally, in container)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PL"]
+"scripts/**" = ["S", "PL"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_decorators = false
+plugins = ["pydantic.mypy"]
+exclude = ["migrations/versions"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "scripts.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/wabot"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
