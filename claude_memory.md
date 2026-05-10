@@ -15,7 +15,7 @@
 | 2    | DB models + Alembic                              | ✅ Done | ORM mapped, Alembic env + idempotent `0001_init`, seed script, /readyz now pings DB |
 | 3    | Interakt webhook ingestion                       | ✅ Done | Shared-secret URL handler, two-layer dedupe (Redis SET NX EX + DB partial unique index), Redis Streams broker port, /readyz now probes Redis too |
 | 4    | Webhook normalizer + canonical event             | ✅ Done | `CanonicalInboundEvent` (frozen, extra=forbid) + Interakt normalizer; pure, deterministic; 14 unit tests covering all 6 event variants, QR/CTA click discrimination, callback chain |
-| 5    | Orchestrator + per-user lock + free-text router  | ⬜ Not started | Use Redis `user:{full_phone}` snapshot |
+| 5    | Orchestrator + per-user lock + free-text router  | ✅ Done | `UserLock` (SET NX PX + watchdog + Lua release), Redis Streams consume API (XREADGROUP/XACK/ensure_consumer_group), pure router (Cases A–D), Orchestrator end-to-end pipeline, NoopJourney + NoopOutboundStatus handlers as defaults; 29 new unit tests (90 total) |
 | 6    | Outbound dispatcher + Interakt adapter           | ⬜ Not started | `fullPhoneNumber`, `callbackData` mandatory |
 | 7    | User registration journey engine                 | ⬜ Not started | |
 | 8    | Registered users journey engine + consent        | ⬜ Not started | |
@@ -32,10 +32,11 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 ## 1. Immediate next actions
 
 1. **User**: copy `.env.example` → `.env`, fill in `DB_PASSWORD`, `INTERAKT_API_KEY`, `INTERAKT_WEBHOOK_PATH_SECRET`.
-2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (47 unit tests should pass).
+2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (90 unit tests should pass).
 3. **User**: `docker compose build && docker compose up` → verify `http://127.0.0.1:8000/healthz` returns 200 and `/readyz` returns 200 once Postgres + Redis are up.
-4. **User**: expose the API publicly for Interakt with `cloudflared tunnel --url http://localhost:8000`, then register the resulting URL inside Interakt as `https://<tunnel>/webhooks/{INTERAKT_WEBHOOK_PATH_SECRET}/interakt`.
-5. Move into **Phase 5** (orchestrator + per-user lock + free-text router). The inbound worker (`src/wabot/workers/inbound_worker.py`) currently idles; Phase 5 wires it to consume the Redis stream, load the raw row, call `wabot.adapters.interakt.normalize`, acquire the `user:{full_phone}` Redis lock, and dispatch into journey handlers.
+4. **Public webhook ingress is no longer in scope for this codebase** — corporate AUP forbids cloudflared / SSH reverse / localhost.run / LocalTunnel from this dev machine. The client will provide an Azure Function (or equivalent managed gateway) that forwards Interakt traffic to the API; until that is delivered the webhook endpoint is reachable only on `127.0.0.1:8000` and via the unit test suite.
+5. Move into **Phase 6** (outbound dispatcher + Interakt adapter). Phase 5 left a `NoopJourneyHandler` registered as the default — Phase 6 builds the outbound pipeline (idempotency-keyed `OutboundMessage` rows, `callbackData = {outbound_id}|{correlation_id}`, retry with tenacity) so Phases 7/8 can register real journey handlers that emit `OutboundIntent`s.
+6. Phase 13 will swap the broker backend from Redis Streams to Azure Service Bus (with sessions = `full_phone_number`) and add `XPENDING`/`XAUTOCLAIM` recovery for any stream messages that died mid-handler. Today's worker logs and continues on `BrokerConsumeError`; redelivery happens via consumer-group retry, not in-process bookkeeping.
 
 ---
 
@@ -101,6 +102,52 @@ Append a dated entry whenever a phase moves forward. Keep entries short (what sh
   ```
 
 <!-- New entries go below this line. Newest first. -->
+
+### 2026-05-10 — Phase 5 complete (orchestrator + per-user lock + free-text router)
+- **Per-user Redis lock** (`src/wabot/cache/locks.py`):
+  - `UserLock` is the **only** mutual-exclusion primitive on the inbound path. Acquisition is `SET NX PX` against `wabot:lock:user:{full_phone}` with a 16-byte random token (`secrets.token_hex(16).encode()`); release is a Lua check-and-delete script (`_RELEASE_SCRIPT`) so we never delete a key owned by a different worker after a TTL refresh race.
+  - A watchdog task (`_refresh_loop`) re-runs `PEXPIRE` every `refresh_interval_seconds` (default 10 s) so a slow handler can never lose the lock under the default 30 s TTL. If `PEXPIRE` returns 0 we log `wabot.lock.lost` and let the handler keep running — the orchestrator will detect the next failure via the journey state row, not via the lock primitive (locks are an ordering guarantee, not a correctness gate).
+  - `__init__` validates `refresh_interval_seconds < ttl_seconds` and `ttl_seconds > 0` so a misconfiguration crashes at construction, not at runtime.
+  - `__aenter__` polls until `acquire_timeout_seconds` (default 30 s) elapses and raises `UserLockUnavailableError`. The orchestrator catches that and returns `False` to the worker, which **does not ack** — the broker redelivers via consumer-group retry.
+- **Broker consume API** (`src/wabot/adapters/broker/base.py`, `redis_streams.py`):
+  - Extended `InboundBroker` Protocol with `ensure_consumer_group(*, group)`, `consume(*, group, consumer, batch_size=16, block_ms=2000) -> list[InboundMessage]`, `ack(*, message_id)`. New error class `BrokerConsumeError` and frozen dataclass `InboundMessage(message_id, partition_key, payload)`.
+  - `RedisStreamsBroker.ensure_consumer_group` uses `XGROUP CREATE … MKSTREAM` and tolerates `BUSYGROUP` (group already exists). Any other `ResponseError` is wrapped as `BrokerConsumeError`.
+  - `consume` uses `XREADGROUP GROUP {group} {consumer} BLOCK {block_ms} COUNT {batch_size} STREAMS {stream} >`, decodes the stored fields (`b"key"` and orjson-encoded `b"data"`), and returns `[]` on idle. Non-dict payloads → `BrokerConsumeError` (poison handling is one layer up).
+  - `ack` calls `XACK` and **logs warnings instead of raising** because `XPENDING` + a future `XAUTOCLAIM` reaper (Phase 13) is the recovery path. Raising here would crash the consumer loop and lose progress on the rest of the batch.
+- **Pure router** (`src/wabot/domain/router.py`):
+  - `route_user_event(*, event, doctor, journey, onboarding) -> RoutingDecision` is a pure function over already-loaded snapshots (no DB, no Redis, no time). Cases A–D from `implementation_plan.md` §6 are implemented exactly as documented:
+    - **Case A** (no doctor row) → start `REGISTRATION` from `REG_INITIATED` expecting `REGISTRATION_TEXT`.
+    - **Case D** (doctor exists, profile incomplete) → resume the existing `REGISTRATION` journey row if present, otherwise restart from `REG_INITIATED`.
+    - **Case C** (profile complete, not onboarded) → kick `REGISTERED.CONSENT_PENDING` expecting a `BUTTON`. Missing onboarding row is treated as not-onboarded so the consent template is sent on first-ever inbound.
+    - **Case B** (profile complete + onboarded) → resume the existing `REGISTERED` journey row, falling back to a fresh `AWAITING_FREE_TEXT` if the row is missing (defensive against bad data).
+  - Status events (everything in `OUTBOUND_STATUS_KINDS`) short-circuit to `RoutingCase.NON_USER_EVENT` so the orchestrator can dispatch them to the outbound-status handler without going through the user router.
+- **Journey framework** (`src/wabot/domain/journeys/base.py`):
+  - `JourneyResult` (frozen dataclass) is the contract every handler returns: `next_journey`, `next_registration_state`, `next_registered_state`, `expected_input_kind`, `expected_outbound_id`, `retry_count`, `context_patch`, `outbound_intents`. `outbound_intents` is typed `tuple[Any, ...]` for now — `OutboundIntent` ships in Phase 6 and the orchestrator just counts and logs them as `wabot.orchestrator.outbound_intents_pending` until the dispatcher exists.
+  - `JourneyHandler(Protocol).handle(*, event, decision, journey, doctor, session) -> JourneyResult` is the only seam Phases 7/8 need to plug into. `OutboundStatusHandler.handle(*, event, session) -> None` is the seam Phase 10 plugs into.
+  - Defaults: `NoopJourneyHandler` (returns the existing journey row's state on resume, otherwise the decision's initial state) and `NoopOutboundStatusHandler`. Both are wired automatically. `register_journey_handler(JourneyType, handler)` and `register_outbound_status_handler(handler)` swap them in. `reset_handlers_for_tests()` undoes every registration — used by the test suite.
+- **Orchestrator** (`src/wabot/services/orchestrator.py`):
+  - `Orchestrator.handle_message(InboundMessage) -> bool`. The boolean is the ack decision: `True` → broker `XACK`, `False` → leave pending so the consumer group redelivers it.
+  - Pipeline: extract `event_id` + `full_phone_number` (poison payloads are logged and acked to drain) → bind a structured-log context (`broker_message_id`, `event_id`, `full_phone_number`, `correlation_id`) → take the user lock → open a single `session_scope()` short transaction → `session.get(WebhookEventRaw, event_id)` (skip if missing or already processed) → `normalize(...)` (mark processed and ack on `NormalizationError`) → branch on `event.event_kind`.
+  - **User events**: load doctor (`DoctorRepository.get_by_phone`), journey (`JourneyRepository.get`), onboarding (one-shot `select` on `WhatsappOnboardingStatus` — no dedicated repo because it's read-only at this point). Idempotency: if `journey.last_processed_event_id == event.interakt_message_id` we skip the handler entirely, mark the raw row processed, and ack (re-delivery from the broker must not double-fire side effects). Otherwise call the registered `JourneyHandler`, then `_persist_result`.
+  - **Status events**: hand straight to `get_outbound_status_handler().handle(event, session)`. The default Noop just logs; Phase 10 swaps in the real one.
+  - `_persist_result` re-loads the doctor before persisting (registration handlers in Phase 7 may create the shell mid-flight). If there's still no doctor row we skip the upsert and log the pending intents — never persist a `journey_state` row without a `doctor_id`. When `from_state != to_state` we call `JourneyRepository.append_history` keyed off `event.interakt_message_id` and (parsed) `correlation_id`.
+  - Local import of `WebhookEventRaw` inside `_handle_locked` is intentional — keeps TC003 clean and avoids circular-import friction with the data layer.
+- **Worker rewrite** (`src/wabot/workers/inbound_worker.py`):
+  - Consumer name is `f"{socket.gethostname()}-{os.getpid()}"` so a multi-worker deployment shows up cleanly in `XPENDING`. Group name comes from `settings.broker_inbound_group`.
+  - `_consume_forever` calls `broker.ensure_consumer_group(group)` once at startup, then loops `consume → handle_message → ack` until SIGINT/SIGTERM. `BrokerConsumeError` triggers a 1-second backoff (no death spirals when Redis blips). `Orchestrator.handle_message` returning `False` means **do not ack** — pending entries are eligible for `XAUTOCLAIM` once Phase 13 ships.
+  - `_run` configures logging, primes the engine + Redis singletons, instantiates `Orchestrator`, installs signal handlers, awaits stop, then `cancel(consume_task) → close_broker → close_redis → dispose_engine` in that order. Same singleton lifecycle as the API process, so swapping between webhook ingest and worker drain doesn't reopen connections.
+- **Tests added** (29 new, 90 total green):
+  - `tests/unit/test_locks.py` (5): hand-rolled async `FakeRedis` covering acquire/release happy path, contention with the `acquire_timeout_seconds` deadline, blocking-second-acquirer, Lua-script ownership safety (mismatched token does not delete), and constructor validation of the TTL/refresh ratio.
+  - `tests/unit/test_router.py` (8): `SimpleNamespace` stand-ins for doctor/journey/onboarding to keep the router pure; cases A–D plus the `RoutingCase.NON_USER_EVENT` short-circuit and the defensive Case B/D restart paths.
+  - `tests/unit/test_orchestrator.py` (8): patches `UserLock`, `get_redis`, `session_scope`, `normalize`, `DoctorRepository`, `JourneyRepository`, and `_load_onboarding`; asserts ack semantics for missing/already-processed raw rows, lock contention, poison payloads, normalization failure, status-event dispatch, user-event handler invocation + persistence, and `last_processed_event_id` deduplication.
+  - `tests/unit/test_broker_redis_streams.py` (8): mocks `redis.asyncio.Redis` to assert `XGROUP CREATE` / `BUSYGROUP` tolerance, `XREADGROUP` decode shape, idle returns `[]`, `XACK` argument shape, and that non-dict payloads or upstream errors raise `BrokerConsumeError`.
+- **Validation**: `pytest -q` → 90/90 green. `pre-commit run --all-files` → all hooks (ruff, ruff-format, black, mypy strict, bandit) clean after one ruff auto-fix on a redundant import.
+- **Decisions**:
+  - Locks are an ordering guarantee, not a correctness gate. The `journey_state.version` row + `last_processed_event_id` are the source of truth for idempotency. We pick this combination explicitly so a multi-worker deployment can lose a Redis lock to TTL expiry without corrupting state.
+  - `broker.ack` swallows errors. `XPENDING` + future `XAUTOCLAIM` (Phase 13) is the recovery story; raising here would crash the loop on a transient blip.
+  - Default journey handler is a real Noop, not a `NotImplementedError` raiser. Phases 7/8 register the real ones. This means the worker can be deployed end-to-end today and will gracefully drain status events while user events get a silent state-only update — easier to validate against a live Interakt without templates configured.
+- **Webhook tunnel work permanently abandoned**. Corporate security flagged cloudflared, localhost.run, LocalTunnel, and SSH reverse tunnels as AUP violations. The user has uninstalled cloudflared and reset the Interakt webhook configuration. Future webhook ingress will be served by an Azure Function/Service hosted by the client and forwarded to this app. **Do not propose tunnels again.**
+- **Next**: Phase 6 — outbound dispatcher + Interakt adapter. Build `OutboundIntent`, `OutboundMessageRepository.create_pending`, `adapters/interakt/client.py`, `services/outbound_pipeline.py` so journey handlers in Phases 7/8 can return `outbound_intents` that turn into Interakt API calls with `callbackData = {outbound_id}|{correlation_id}`.
 
 ### 2026-05-10 — Phase 4 complete (webhook normalizer + canonical event)
 - **Domain model** (`src/wabot/domain/events.py`):

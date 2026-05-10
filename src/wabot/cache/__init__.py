@@ -9,5 +9,14 @@ from __future__ import annotations
 
 from wabot.cache.client import close_redis, get_redis, redis_ping
 from wabot.cache.dedupe import WebhookDedupe
+from wabot.cache.locks import UserLock, UserLockUnavailableError, build_user_lock_key
 
-__all__ = ["WebhookDedupe", "close_redis", "get_redis", "redis_ping"]
+__all__ = [
+    "UserLock",
+    "UserLockUnavailableError",
+    "WebhookDedupe",
+    "build_user_lock_key",
+    "close_redis",
+    "get_redis",
+    "redis_ping",
+]

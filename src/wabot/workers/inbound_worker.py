@@ -1,25 +1,90 @@
 """Inbound worker.
 
-Phase 0 stub: starts up, logs identity, and idles cleanly. Phase 5 replaces the
-body of `_run` with the real broker-consume → orchestrator pipeline. The
-process-level structure (signal handling, lifespan, exit codes) defined here
-is final.
+Phase 5: drains the inbound broker and runs each message through the
+orchestrator. The process-level structure (signal handling, lifespan,
+exit codes) defined in earlier phases is preserved verbatim.
+
+Concurrency model (implementation_plan.md §10.3 / §11):
+
+* A single worker process per replica owns one consumer-group reader
+  on `BROKER_INBOUND_STREAM`. Per-user FIFO is preserved because
+  events for the same `partition_key` end up in the same XREADGROUP
+  delivery and we serialize them by acquiring the per-user Redis lock
+  inside the orchestrator.
+* Messages are processed sequentially per worker; we do **not** spawn
+  per-message tasks in v1. Phase 13 introduces a hash-partitioned
+  fan-out for higher throughput.
+* Acks happen only when the orchestrator returns ``True``. Transient
+  failures (lock contention, DB outage) leave the entry pending and
+  the consumer-group machinery redelivers it on the next poll.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
+import socket
 from contextlib import suppress
 from typing import NoReturn
 
-from wabot.adapters.broker import close_broker
+from wabot.adapters.broker import close_broker, get_broker
 from wabot.cache import close_redis, get_redis
 from wabot.data.db import dispose_engine, get_engine
-from wabot.infra.config import get_settings
+from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.logging import configure_logging, get_logger
+from wabot.services.orchestrator import Orchestrator
 
 logger = get_logger(__name__)
+
+
+def _consumer_name(settings: AppSettings) -> str:
+    """Stable identifier for this consumer instance.
+
+    Combining hostname + PID gives us human-readable observability in
+    `XPENDING` listings without needing external coordination.
+    """
+    del settings
+    return f"{socket.gethostname()}-{os.getpid()}"
+
+
+async def _consume_forever(
+    *,
+    settings: AppSettings,
+    orchestrator: Orchestrator,
+    stop: asyncio.Event,
+) -> None:
+    broker = get_broker(settings)
+    group = settings.broker_inbound_group
+    consumer = _consumer_name(settings)
+    await broker.ensure_consumer_group(group=group)
+
+    logger.info(
+        "wabot.worker.consume_loop_start",
+        stream=settings.broker_inbound_stream,
+        group=group,
+        consumer=consumer,
+    )
+
+    while not stop.is_set():
+        try:
+            messages = await broker.consume(
+                group=group,
+                consumer=consumer,
+                batch_size=16,
+                block_ms=2000,
+            )
+        except Exception as exc:
+            logger.error("wabot.worker.consume_failed", error=str(exc))
+            await asyncio.sleep(1.0)
+            continue
+
+        for message in messages:
+            if stop.is_set():
+                break
+            ok = await orchestrator.handle_message(message)
+            if ok:
+                await broker.ack(message_id=message.message_id)
 
 
 async def _run() -> None:
@@ -27,6 +92,7 @@ async def _run() -> None:
     configure_logging(settings)
     get_engine(settings)
     get_redis(settings)
+    orchestrator = Orchestrator(settings)
     logger.info(
         "wabot.worker.start",
         broker=settings.broker_backend,
@@ -39,10 +105,16 @@ async def _run() -> None:
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
-    # Phase 0: idle. Phase 5 will pull from the broker and dispatch.
+    consume_task = asyncio.create_task(
+        _consume_forever(settings=settings, orchestrator=orchestrator, stop=stop),
+        name="wabot-inbound-consume",
+    )
     try:
         await stop.wait()
     finally:
+        consume_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await consume_task
         await close_broker()
         await close_redis()
         await dispose_engine()

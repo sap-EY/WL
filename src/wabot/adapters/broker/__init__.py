@@ -8,7 +8,19 @@ Bus with sessions (cloud, per-user FIFO via session id).
 
 from __future__ import annotations
 
-from wabot.adapters.broker.base import BrokerEnqueueError, InboundBroker
+from wabot.adapters.broker.base import (
+    BrokerConsumeError,
+    BrokerEnqueueError,
+    InboundBroker,
+    InboundMessage,
+)
 from wabot.adapters.broker.factory import close_broker, get_broker
 
-__all__ = ["BrokerEnqueueError", "InboundBroker", "close_broker", "get_broker"]
+__all__ = [
+    "BrokerConsumeError",
+    "BrokerEnqueueError",
+    "InboundBroker",
+    "InboundMessage",
+    "close_broker",
+    "get_broker",
+]
