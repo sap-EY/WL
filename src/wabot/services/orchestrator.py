@@ -33,6 +33,7 @@ Design constraints (carried forward from earlier phases):
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -64,7 +65,9 @@ if TYPE_CHECKING:
     from wabot.data.models.doctor import Doctor
     from wabot.data.models.journey import JourneyState
     from wabot.domain.events import CanonicalInboundEvent
+    from wabot.domain.outbound import OutboundIntent
     from wabot.infra.config import AppSettings
+    from wabot.services.outbound_pipeline import OutboundPipeline
 
 logger = get_logger(__name__)
 
@@ -78,11 +81,28 @@ class OrchestratorPoisonError(RuntimeError):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class _DispatchPlan:
+    """Outbound dispatch information captured during the locked
+    transaction and consumed after it commits.
+    """
+
+    doctor_id: uuid.UUID
+    state_when_sent: str | None
+    intents: tuple[OutboundIntent, ...]
+
+
 class Orchestrator:
     """Stateless coordinator. One instance per worker process."""
 
-    def __init__(self, settings: AppSettings) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        *,
+        pipeline: OutboundPipeline | None = None,
+    ) -> None:
         self._settings = settings
+        self._pipeline = pipeline
 
     async def handle_message(self, message: InboundMessage) -> bool:
         """Process one broker message.
@@ -118,11 +138,23 @@ class Orchestrator:
                 full_phone_number=full_phone_number,
                 ttl_seconds=self._settings.redis_lock_ttl_seconds,
             ):
-                await self._handle_locked(
+                plan = await self._handle_locked(
                     event_id=event_id,
                     correlation_id=correlation_id,
                     log=log,
                 )
+                if plan is not None and plan.intents and self._pipeline is not None:
+                    await self._pipeline.dispatch(
+                        plan.intents,
+                        doctor_id=plan.doctor_id,
+                        state_when_sent=plan.state_when_sent,
+                        correlation_id=correlation_id,
+                    )
+                elif plan is not None and plan.intents:
+                    log.info(
+                        "wabot.orchestrator.outbound_intents_dropped_no_pipeline",
+                        count=len(plan.intents),
+                    )
         except UserLockUnavailableError:
             log.warning("wabot.orchestrator.lock_unavailable")
             return False
@@ -137,15 +169,15 @@ class Orchestrator:
         event_id: uuid.UUID,
         correlation_id: str,
         log: Any,
-    ) -> None:
+    ) -> _DispatchPlan | None:
         async with session_scope() as session:
             raw_row = await session.get(WebhookEventRaw, event_id)
             if raw_row is None:
                 log.warning("wabot.orchestrator.raw_event_missing")
-                return
+                return None
             if raw_row.processed_at is not None:
                 log.info("wabot.orchestrator.raw_event_already_processed")
-                return
+                return None
 
             try:
                 event = normalize(
@@ -156,14 +188,16 @@ class Orchestrator:
             except NormalizationError as exc:
                 log.warning("wabot.orchestrator.normalization_failed", error=str(exc))
                 raw_row.processed_at = datetime.now(UTC)
-                return
+                return None
 
+            plan: _DispatchPlan | None = None
             if event.event_kind in USER_EVENT_KINDS:
-                await self._handle_user_event(session=session, event=event, log=log)
+                plan = await self._handle_user_event(session=session, event=event, log=log)
             else:
                 await self._handle_status_event(session=session, event=event, log=log)
 
             raw_row.processed_at = datetime.now(UTC)
+            return plan
 
     async def _handle_user_event(
         self,
@@ -171,7 +205,7 @@ class Orchestrator:
         session: AsyncSession,
         event: CanonicalInboundEvent,
         log: Any,
-    ) -> None:
+    ) -> _DispatchPlan | None:
         doctor_repo = DoctorRepository(session)
         journey_repo = JourneyRepository(session)
 
@@ -185,7 +219,7 @@ class Orchestrator:
                 event_kind=event.event_kind.value,
                 interakt_message_id=event.interakt_message_id,
             )
-            return
+            return None
 
         decision = route_user_event(
             event=event,
@@ -205,7 +239,7 @@ class Orchestrator:
             # journey), but keep the guard so a future router change
             # cannot silently drop messages.
             log.warning("wabot.orchestrator.no_journey_decision")
-            return
+            return None
 
         handler = get_journey_handler(decision.journey)
         result = await handler.handle(
@@ -216,7 +250,7 @@ class Orchestrator:
             session=session,
         )
 
-        await self._persist_result(
+        return await self._persist_result(
             session=session,
             event=event,
             decision=decision,
@@ -250,15 +284,19 @@ class Orchestrator:
         journey: JourneyState | None,
         result: JourneyResult,
         log: Any,
-    ) -> None:
+    ) -> _DispatchPlan | None:
         # The handler may have created the doctor row inside its
         # transition (registration Case A). Reload if needed.
         if doctor is None:
             doctor = await DoctorRepository(session).get_by_phone(event.full_phone_number)
             if doctor is None:
                 log.info("wabot.orchestrator.no_doctor_row_skipping_persistence")
-                self._log_intents(result, log)
-                return
+                if result.outbound_intents:
+                    log.info(
+                        "wabot.orchestrator.outbound_intents_dropped_no_doctor",
+                        count=len(result.outbound_intents),
+                    )
+                return None
 
         journey_repo = JourneyRepository(session)
         from_state = _journey_state_label(journey)
@@ -295,18 +333,13 @@ class Orchestrator:
             from_state=from_state,
             to_state=to_state,
         )
-        self._log_intents(result, log)
-
-    @staticmethod
-    def _log_intents(result: JourneyResult, log: Any) -> None:
-        if result.outbound_intents:
-            # Phase 6 will hand these to the outbound dispatcher. Until
-            # then we just log so the orchestrator is observable
-            # end-to-end.
-            log.info(
-                "wabot.orchestrator.outbound_intents_pending_dispatch",
-                count=len(result.outbound_intents),
-            )
+        if not result.outbound_intents:
+            return None
+        return _DispatchPlan(
+            doctor_id=doctor.id,
+            state_when_sent=to_state,
+            intents=result.outbound_intents,
+        )
 
 
 # ---------------------------------------------------------------------------

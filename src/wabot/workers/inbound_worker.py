@@ -29,11 +29,13 @@ from contextlib import suppress
 from typing import NoReturn
 
 from wabot.adapters.broker import close_broker, get_broker
+from wabot.adapters.interakt import InteraktClient
 from wabot.cache import close_redis, get_redis
 from wabot.data.db import dispose_engine, get_engine
 from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.logging import configure_logging, get_logger
 from wabot.services.orchestrator import Orchestrator
+from wabot.services.outbound_pipeline import OutboundPipeline
 
 logger = get_logger(__name__)
 
@@ -91,8 +93,10 @@ async def _run() -> None:
     settings = get_settings()
     configure_logging(settings)
     get_engine(settings)
-    get_redis(settings)
-    orchestrator = Orchestrator(settings)
+    redis = get_redis(settings)
+    interakt_client = InteraktClient(settings, redis_client=redis)
+    pipeline = OutboundPipeline(client=interakt_client)
+    orchestrator = Orchestrator(settings, pipeline=pipeline)
     logger.info(
         "wabot.worker.start",
         broker=settings.broker_backend,
@@ -115,6 +119,8 @@ async def _run() -> None:
         consume_task.cancel()
         with suppress(asyncio.CancelledError, Exception):
             await consume_task
+        with suppress(Exception):
+            await interakt_client.aclose()
         await close_broker()
         await close_redis()
         await dispose_engine()

@@ -16,7 +16,7 @@
 | 3    | Interakt webhook ingestion                       | ✅ Done | Shared-secret URL handler, two-layer dedupe (Redis SET NX EX + DB partial unique index), Redis Streams broker port, /readyz now probes Redis too |
 | 4    | Webhook normalizer + canonical event             | ✅ Done | `CanonicalInboundEvent` (frozen, extra=forbid) + Interakt normalizer; pure, deterministic; 14 unit tests covering all 6 event variants, QR/CTA click discrimination, callback chain |
 | 5    | Orchestrator + per-user lock + free-text router  | ✅ Done | `UserLock` (SET NX PX + watchdog + Lua release), Redis Streams consume API (XREADGROUP/XACK/ensure_consumer_group), pure router (Cases A–D), Orchestrator end-to-end pipeline, NoopJourney + NoopOutboundStatus handlers as defaults; 29 new unit tests (90 total) |
-| 6    | Outbound dispatcher + Interakt adapter           | ⬜ Not started | `fullPhoneNumber`, `callbackData` mandatory |
+| 6    | Outbound dispatcher + Interakt adapter           | ✅ Done | `OutboundIntent` + `InteractiveButton` (frozen pydantic); message catalog + pure builders; `InteraktClient` (httpx async + tenacity exp-jitter retry on 5xx/network, immediate fail on 4xx, optional Redis token-bucket rate guard); `OutboundPipeline` (deterministic `idempotency_key` → `create_pending` → `callbackData = {row.id}|{correlation_id}` → send → `mark_sent` / FAILED); orchestrator dispatches intents post-commit under user lock; 32 new unit tests (122 total) |
 | 7    | User registration journey engine                 | ⬜ Not started | |
 | 8    | Registered users journey engine + consent        | ⬜ Not started | |
 | 9    | GenAI gateway (async)                            | ⬜ Not started | Worker awaits; never the webhook hot path |
@@ -35,7 +35,7 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (90 unit tests should pass).
 3. **User**: `docker compose build && docker compose up` → verify `http://127.0.0.1:8000/healthz` returns 200 and `/readyz` returns 200 once Postgres + Redis are up.
 4. **Public webhook ingress is no longer in scope for this codebase** — corporate AUP forbids cloudflared / SSH reverse / localhost.run / LocalTunnel from this dev machine. The client will provide an Azure Function (or equivalent managed gateway) that forwards Interakt traffic to the API; until that is delivered the webhook endpoint is reachable only on `127.0.0.1:8000` and via the unit test suite.
-5. Move into **Phase 6** (outbound dispatcher + Interakt adapter). Phase 5 left a `NoopJourneyHandler` registered as the default — Phase 6 builds the outbound pipeline (idempotency-keyed `OutboundMessage` rows, `callbackData = {outbound_id}|{correlation_id}`, retry with tenacity) so Phases 7/8 can register real journey handlers that emit `OutboundIntent`s.
+5. Move into **Phase 7** (user registration journey engine). The outbound pipeline now lives in `services/outbound_pipeline.py`; Phase 7 will register a real `JourneyHandler` for `JourneyType.REGISTRATION` that parses '#'-separated registration payloads and returns `OutboundIntent`s built via `wabot.domain.messages.build_text/build_buttons/build_template`.
 6. Phase 13 will swap the broker backend from Redis Streams to Azure Service Bus (with sessions = `full_phone_number`) and add `XPENDING`/`XAUTOCLAIM` recovery for any stream messages that died mid-handler. Today's worker logs and continues on `BrokerConsumeError`; redelivery happens via consumer-group retry, not in-process bookkeeping.
 
 ---
@@ -102,6 +102,42 @@ Append a dated entry whenever a phase moves forward. Keep entries short (what sh
   ```
 
 <!-- New entries go below this line. Newest first. -->
+
+### 2026-05-11 — Phase 6 complete (outbound dispatcher + Interakt adapter)
+- **`OutboundIntent` contract** (`src/wabot/domain/outbound.py`):
+  - Pydantic v2 model, `extra="forbid"`, `frozen=True`, slot-friendly field set: `kind` (`Literal["TEXT","BUTTONS","TEMPLATE"]`), `full_phone_number` (length-bounded), `symbol` (catalog id; participates in idempotency), and optional payload fields (`text`, `buttons: tuple[InteractiveButton,...]|None`, `template_name`/`template_locale`/`body_values`/`header_values`/`button_values`/`file_name`).
+  - `InteractiveButton` enforces WhatsApp's 20-char title cap and a non-empty id. Every model is frozen so a handler cannot rewrite an emitted intent and cause partial dispatch.
+- **Catalog + pure builders** (`src/wabot/domain/messages/`):
+  - `MessageSymbol(StrEnum)` is the single source of truth for outbound symbols (6 registration prompts, 5 registered prompts, 2 templates). `CATALOG: dict[MessageSymbol, CatalogEntry]` carries the kind + (for TEXT/BUTTONS) the English copy + (for TEMPLATE) the `AppSettings` attribute name that resolves the Interakt template code-name. `ButtonId(StrEnum)` keeps reply-id strings centralised so the journey routers and the dispatcher cannot drift.
+  - `build_text` / `build_buttons` / `build_template` are pure: `(symbol, full_phone_number, params) -> OutboundIntent`. They raise `MessageBuildError` on kind mismatch, missing copy, or empty buttons. Phases 7/8 call these instead of constructing `OutboundIntent` by hand so kind+symbol agreement is guaranteed at the call site.
+- **Interakt async client** (`src/wabot/adapters/interakt/client.py`):
+  - `InteraktClient(settings, *, http_client=None, redis_client=None, sleep=asyncio.sleep)` owns the lifecycle of one `httpx.AsyncClient` (timeouts pulled from `settings.interakt_timeout_*`, base URL from `settings.interakt_base_url`, and `Authorization: Basic {INTERAKT_API_KEY}` header — Interakt issues a pre-encoded key, we pass it through verbatim per the docs). `aclose()` is idempotent; the worker calls it on shutdown.
+  - `send(intent, *, callback_data)` translates the intent via `build_request_body(...)` (handles `Text` / `InteractiveButton` / `Template` shapes; **never** sends `template_category`; always sends `fullPhoneNumber` + `callbackData`) and POSTs to `/v1/public/message/`. 4xx \u2192 `InteraktPermanentError` (no retry). 5xx / network / non-JSON \u2192 `InteraktTransientError`. Tenacity `AsyncRetrying` wraps the whole thing with `wait_random_exponential(multiplier=0.5, max=8)` + `stop_after_attempt(4)`; `sleep` is injectable so unit tests don't burn real wall-clock seconds. A 200 response with `result=false` collapses to permanent (Interakt's documented "rejected" envelope).
+  - `_acquire_rate_token()` runs an `INCR` + `EXPIRE 2` per-second token bucket against `wabot:interakt:rate:{epoch_second}`. Above `settings.interakt_rate_limit_rps` we sleep until the next second boundary. Redis errors degrade open (we never block outbound traffic on our own infra) and are logged.
+- **Outbound pipeline** (`src/wabot/services/outbound_pipeline.py`):
+  - `compute_idempotency_key` is `sha256(doctor_id|state_when_sent|correlation_id|sequence|symbol|sha256(payload_dump))` so retries collapse but two intents from the same handler invocation get distinct rows. Sequence is the per-dispatch index (0, 1, 2 \u2026) — necessary because two consecutive symbols *could* be identical (re-prompt + same prompt reissue) and we still want the second one to live.
+  - Per intent: open `session_scope()` \u2192 `OutboundRepository.create_pending(...)` (idempotency-keyed; returns the existing row on collision) \u2192 if the row was fresh, rewrite `callback_data` from the placeholder `"PENDING_SEND"` to `"{row.id}|{correlation_id}"` \u2192 commit. Then `await client.send(intent, callback_data=...)` outside the DB transaction. On success: a second short transaction calls `mark_sent(row.id, interakt_message_id, sent_at)`. On `InteraktPermanentError` (or transient retries exhausted): a third short transaction sets `status=FAILED`, `failed_at=now`, `failure_reason=str(exc)[:1000]`. Per-intent failures are isolated so one 4xx never aborts later intents.
+- **Orchestrator wiring** (`src/wabot/services/orchestrator.py`):
+  - `Orchestrator(settings, *, pipeline=None)` accepts an optional `OutboundPipeline`; tests still construct `Orchestrator(settings)` and pipeline-less dispatch is a single warn log (`outbound_intents_dropped_no_pipeline`).
+  - `_handle_locked` now returns a `_DispatchPlan(doctor_id, state_when_sent, intents)` captured **inside** the session_scope. After the scope commits but **still under the user lock**, `handle_message` calls `await self._pipeline.dispatch(plan.intents, ...)`. This satisfies plan \u00a79: DB transaction is short, outbound never holds a connection, and per-user FIFO ordering (one outbound chain finishes before the next inbound event runs).
+  - `JourneyResult.outbound_intents` tightened from `tuple[Any, ...]` to `tuple[OutboundIntent, ...]`. Phases 7/8 now have a typed contract.
+- **Worker lifecycle** (`src/wabot/workers/inbound_worker.py`):
+  - `_run` constructs `InteraktClient(settings, redis_client=redis)` once at startup and threads it into `OutboundPipeline(client=...)` \u2192 `Orchestrator(settings, pipeline=...)`. Shutdown cancels the consume task, `aclose()`s the Interakt client (suppress errors), then closes broker / redis / DB engine in the existing order.
+- **Tests** (32 new, 122 total):
+  - `tests/unit/test_outbound_intent.py` (10): frozen, extra=forbid, length bounds, kind branches.
+  - `tests/unit/test_messages_builder.py` (8): catalog text + override path, kind mismatches, empty-buttons guard, template happy path.
+  - `tests/unit/test_interakt_client.py` (8): `httpx.MockTransport` coverage of TEXT/BUTTONS/TEMPLATE wire shapes (asserts `template_category` absent, `callbackData` present), 4xx \u2192 permanent, 5xx retried-then-200, 5xx exhausted, 200+`result=false` \u2192 permanent. Backoff sleeps stubbed via injected `sleep`.
+  - `tests/unit/test_outbound_pipeline.py` (6): persists + sends, marks FAILED on `InteraktPermanentError`, isolates per-intent failures, idempotency-key determinism (same args identical, sequence different distinct), kind enum sanity.
+- **Pre-commit**: added `httpx==0.28.1` and `tenacity==9.1.4` to the mypy hook's `additional_dependencies` so strict mypy runs in the pre-commit cached venv. All hooks (ruff, ruff-format, black, mypy, bandit) clean.
+- **Lessons learned**:
+  - mypy with `httpx`/`tenacity` *needs* both libs installed in the pre-commit env, not just locally — strict mode rejects `Cannot find implementation or library stub` even when you have stubs in your project venv.
+  - `tenacity.AsyncRetrying` accepts `sleep=` directly; passing a no-op makes 4-attempt retry tests run in milliseconds rather than ~12 s.
+  - `wait_random_exponential` (not `wait_exponential_jitter`) is the public tenacity 9.x API for jittered exponential.
+  - Lazy `_outbound_model()` to dodge a circular import is a code smell. Just import `OutboundMessage` directly — `outbound_repo` already imports it and the pipeline depends on the repo, so there's no cycle.
+- **Not in scope (deferred)**:
+  - A reconciliation worker that re-attempts `FAILED` rows with `failure_reason` matching transient classes \u2014 Phase 11 (observability + replay tooling) will own that.
+  - Surfacing rate-limit waits as a Prometheus counter \u2014 Phase 11.
+- **Next**: Phase 7 \u2014 user registration journey engine. Build `domain/journeys/registration_handler.py` + `domain/registration_parser.py`. Plug in via `register_journey_handler(JourneyType.REGISTRATION, RegistrationJourneyHandler())`. Outbound side is fully wired: handlers just return `outbound_intents=(...)` built from `wabot.domain.messages`.
 
 ### 2026-05-10 — Phase 5 complete (orchestrator + per-user lock + free-text router)
 - **Per-user Redis lock** (`src/wabot/cache/locks.py`):

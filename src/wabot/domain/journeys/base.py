@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from wabot.data.models.doctor import Doctor
     from wabot.data.models.journey import JourneyState
     from wabot.domain.events import CanonicalInboundEvent
+    from wabot.domain.outbound import OutboundIntent
     from wabot.domain.router import RoutingDecision
 
 logger = get_logger(__name__)
@@ -34,10 +35,10 @@ logger = get_logger(__name__)
 class JourneyResult:
     """Output of a journey handler. Persisted by the orchestrator.
 
-    `outbound_intents` is loosely typed (`tuple[Any, ...]`) at this
-    phase because Phase 6 introduces the concrete `OutboundIntent`
-    model. The orchestrator treats the tuple opaquely and forwards it
-    to the outbound dispatcher.
+    `outbound_intents` is the ordered list of messages to send via the
+    outbound dispatcher (Phase 6). The orchestrator hands them to
+    `services.outbound_pipeline.OutboundPipeline.dispatch` after the
+    journey state transaction commits.
     """
 
     next_journey: JourneyType
@@ -47,7 +48,7 @@ class JourneyResult:
     expected_outbound_id: uuid.UUID | None = None
     retry_count: int = 0
     context_patch: Mapping[str, Any] = field(default_factory=dict)
-    outbound_intents: tuple[Any, ...] = ()
+    outbound_intents: tuple[OutboundIntent, ...] = ()
 
 
 @runtime_checkable
