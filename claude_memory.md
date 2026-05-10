@@ -13,7 +13,7 @@
 | 0    | Repository bootstrap                             | ✅ Done | pyproject, Dockerfile, compose, lint, /healthz, smoke tests |
 | 1    | Config, logging, correlation                     | ✅ Done | structlog JSON + `X-Correlation-Id` middleware + stable error envelope wired |
 | 2    | DB models + Alembic                              | ✅ Done | ORM mapped, Alembic env + idempotent `0001_init`, seed script, /readyz now pings DB |
-| 3    | Interakt webhook ingestion                       | ⬜ Not started | |
+| 3    | Interakt webhook ingestion                       | ✅ Done | Shared-secret URL handler, two-layer dedupe (Redis SET NX EX + DB partial unique index), Redis Streams broker port, /readyz now probes Redis too |
 | 4    | Webhook normalizer + canonical event             | ⬜ Not started | |
 | 5    | Orchestrator + per-user lock + free-text router  | ⬜ Not started | Use Redis `user:{full_phone}` snapshot |
 | 6    | Outbound dispatcher + Interakt adapter           | ⬜ Not started | `fullPhoneNumber`, `callbackData` mandatory |
@@ -32,9 +32,10 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 ## 1. Immediate next actions
 
 1. **User**: copy `.env.example` → `.env`, fill in `DB_PASSWORD`, `INTERAKT_API_KEY`, `INTERAKT_WEBHOOK_PATH_SECRET`.
-2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (smoke tests should pass).
-3. **User**: `docker compose build && docker compose up` → verify `http://127.0.0.1:8000/healthz` returns 200.
-4. Move into **Phase 3** (Interakt webhook ingestion: shared-secret URL, raw event persist + dedupe + enqueue, sub-100 ms ack).
+2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (47 unit tests should pass).
+3. **User**: `docker compose build && docker compose up` → verify `http://127.0.0.1:8000/healthz` returns 200 and `/readyz` returns 200 once Postgres + Redis are up.
+4. **User**: expose the API publicly for Interakt with `cloudflared tunnel --url http://localhost:8000`, then register the resulting URL inside Interakt as `https://<tunnel>/webhooks/{INTERAKT_WEBHOOK_PATH_SECRET}/interakt`.
+5. Move into **Phase 4** (webhook normalizer + canonical event).
 
 ---
 
@@ -100,6 +101,46 @@ Append a dated entry whenever a phase moves forward. Keep entries short (what sh
   ```
 
 <!-- New entries go below this line. Newest first. -->
+
+### 2026-05-10 — Phase 3 complete (Interakt webhook ingestion)
+- **Cache layer** (`src/wabot/cache/`):
+  - `client.py` — lazy singleton `Redis.from_url(..., decode_responses=False, socket_keepalive=True, health_check_interval=30, socket_connect_timeout=2.0)`. `redis_ping(timeout_seconds=1.0)` uses `asyncio.timeout`; failures logged at warning level with the URL **redacted** (`_redacted_url` strips creds before logging). `close_redis()` calls `aclose()` and clears the singleton.
+  - `dedupe.py` — `WebhookDedupe.claim(key)` does `SET NX EX` with TTL = `settings.redis_dedupe_ttl_seconds` (default 600 s). `build_dedupe_key(event_type, interakt_message_id, message_status)` mirrors the DB partial unique index exactly (missing parts → `"-"` sentinel) so Redis fast-path and DB strong-path agree on identity.
+- **Broker port** (`src/wabot/adapters/broker/`):
+  - `base.py` — `InboundBroker` `Protocol` with `enqueue(*, partition_key, payload) -> str` and `close()`; `BrokerEnqueueError(RuntimeError)`.
+  - `redis_streams.py` — `RedisStreamsBroker` writes to `XADD <stream> MAXLEN ~ 100_000` with fields `{"key": partition_key, "data": orjson.dumps(payload)}`. Any `RedisError` is wrapped as `BrokerEnqueueError`. `close()` is a no-op (Redis client lifecycle is owned by `wabot.cache.client`).
+  - `factory.py` — lazy singleton `get_broker(settings)` switching on `settings.broker_backend` (`"redis_streams"` now; `"azure_servicebus"` raises `NotImplementedError` until Phase 13). `set_broker(...)` is a test seam.
+- **Schema** (`src/wabot/api/schemas/interakt_webhook.py`): permissive Pydantic v2 envelope (`ConfigDict(extra="allow")`) so the raw row stays byte-faithful. Validates only the routing fields we actually consume:
+  - `interakt_message_id` ← `data.message.id`
+  - `message_status` ← `data.message.message_status`
+  - `full_phone_number` prefers `customer.channel_phone_number`, falls back to `country_code.lstrip('+') + phone_number`.
+  - Constants `EVENT_TYPE_API_SENT/DELIVERED/READ/FAILED/CLICKED/RECEIVED/TEMPLATE_STATUS` plus `KNOWN_EVENT_TYPES: frozenset` so unknown event types are still persisted but skip enqueue.
+- **Router** (`src/wabot/api/routers/webhooks.py`): `POST /webhooks/{secret}/interakt`. Failure modes are explicit and final:
+  1. **Wrong secret** → `secrets.compare_digest` mismatch → `HTTPException(404)` (no information leakage; indistinguishable from a wrong path).
+  2. **Bad JSON / bad envelope** → `ValidationFailedError` → 400 with stable `{"error": {"code": "validation_failed", ...}}` envelope.
+  3. **Redis dedupe pre-filter** — if `claim()` returns `False`, return `WebhookAckResponse(status="duplicate")` immediately, **without ever opening a DB connection**. Cache failures are tolerated (`is_first=True`) and logged at warning level.
+  4. **DB write** runs inside a single short `session_scope()` calling `WebhookRepository.record_if_new(...)`. If `record_if_new` raises, log and return `WebhookAckResponse(status="ok", ...)` with HTTP 503 so Interakt retries (durable row is the source of truth, not the broker).
+  5. **DB-side duplicate** (Redis missed but DB partial unique index caught it) → 200 + `status="duplicate"`, no enqueue.
+  6. **Broker enqueue** runs **after** DB commit, **outside** `session_scope`, so the DB connection is never held while talking to Redis. Broker failures are logged but do not block the 200 ack — the row is durable and a future janitor will pick up `processed_at IS NULL`. Only enqueue when `event_type in KNOWN_EVENT_TYPES`.
+- **Lifecycle wiring** (`main.py`, `workers/inbound_worker.py`): both processes prime `get_engine(settings)` and `get_redis(settings)` at startup so the first request never pays connection cost; on shutdown `close_broker(); close_redis(); dispose_engine()` in that order. `pool_pre_ping=True` + `pool_recycle=1800` from Phase 2 keep the SQLAlchemy pool healthy without idle leaks.
+- **/readyz** (`api/routers/health.py`): now probes both DB and Redis via `asyncio.gather(db_ping(), redis_ping())`. Either failing → 503 with `status="degraded"` and `dependencies={"db": bool, "redis": bool}`.
+- **DB hygiene checklist** (per user requirement "no unnecessary db connections will be open"):
+  - One short transaction per webhook request; commit happens before the broker call.
+  - Redis pre-filter eliminates DB hits on duplicate bursts (Interakt retries can hammer us).
+  - Sessions never escape `session_scope()` (FastAPI dep also routes through it).
+  - Engine + Redis client are singletons; opened once at lifespan startup, disposed once at shutdown.
+  - Worker uses the same engine/redis singletons — no per-message connections.
+- **Public URL for local testing**: cloudflared (`winget install --id Cloudflare.cloudflared`). One command: `cloudflared tunnel --url http://localhost:8000`. Register the resulting URL in Interakt as `https://<tunnel>/webhooks/<INTERAKT_WEBHOOK_PATH_SECRET>/interakt`.
+- **Tests** (15 new):
+  - `tests/unit/test_interakt_schema.py` — 6 cases covering routing-field extraction, country-code fallback, missing `type` rejection, unknown event acceptance, click-event preservation, extra-field byte-faithfulness.
+  - `tests/unit/test_cache.py` — 2 cases covering `build_dedupe_key` agreement with the DB unique index.
+  - `tests/unit/test_webhooks.py` — 6 cases (wrong secret 404; bad envelope 400; happy path persist+enqueue; Redis dedupe short-circuit with no DB/broker hit; DB-side duplicate with no enqueue; click event accepted).
+  - `tests/unit/test_health.py` extended for the new `redis` dependency field.
+- **Test infra fix**: added an autouse `_reset_structlog_after_test` fixture in `tests/conftest.py`. Without it, `test_logging.py` runs under `capsys`, which closes the captured stdout file at teardown; structlog's `PrintLoggerFactory` had cached that closed file and later tests that emitted log lines crashed with `ValueError: I/O operation on closed file`. The fixture calls `structlog.reset_defaults()` after every test so each one starts clean.
+- **Tooling**: `pyproject.toml` mypy override added for `redis.*` (no first-party stubs in our pin: `redis==7.4.0`).
+- **Validation**: `pytest -q` → 47/47 passing. `pre-commit run --all-files` → all hooks green (ruff legacy alias, ruff format, black, mypy strict, bandit).
+- **Next**: Phase 4 — webhook normalizer to translate `webhook_event_raw` rows into the canonical event the orchestrator consumes (extract intent: text vs button vs status, attach `outbound_message_id` via `callbackData` chain, etc.).
+
 
 ### 2026-05-08 — Phase 2 complete (data layer, Alembic, seed script)
 - **Data layer**: `src/wabot/data/base.py` (`Base(DeclarativeBase)` with `MetaData(schema="wabot", naming_convention=…)`); `src/wabot/data/db.py` (lazy async engine + sessionmaker singletons; `pool_pre_ping=True`, `pool_recycle=1800`, connect-event hook setting `search_path` and `statement_timeout`; `session_scope()` commit-on-success/rollback-on-error; FastAPI `get_session` dep; `ping(timeout_seconds=2.0)` using `asyncio.timeout`; `dispose_engine()`).

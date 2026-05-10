@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from wabot import __version__
-from wabot.api.routers import health
+from wabot.adapters.broker import close_broker
+from wabot.api.routers import health, webhooks
+from wabot.cache import close_redis, get_redis
 from wabot.data.db import dispose_engine, get_engine
 from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.correlation import CorrelationMiddleware
@@ -36,13 +38,15 @@ logger = get_logger(__name__)
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
 
-    Configures logging, primes the async DB engine, and emits a
-    structured startup event. Disposes the engine on shutdown. Later
-    phases will open the Redis pool and HTTP clients here too.
+    Configures logging, primes the async DB engine and Redis client,
+    and emits a structured startup event. Disposes everything on
+    shutdown. The broker is created lazily on first enqueue and
+    closed here as well.
     """
     settings: AppSettings = get_settings()
     configure_logging(settings)
     get_engine(settings)
+    get_redis(settings)
     logger.info(
         "wabot.startup",
         db=settings.db_dsn_for_logging,
@@ -52,6 +56,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await close_broker()
+        await close_redis()
         await dispose_engine()
         logger.info("wabot.shutdown")
 
@@ -78,9 +84,9 @@ def create_app() -> FastAPI:
 
 def _register_routes(app: FastAPI) -> None:
     app.include_router(health.router)
+    app.include_router(webhooks.router)
     # Future phases:
-    #   from wabot.api.routers import webhooks, admin
-    #   app.include_router(webhooks.router, prefix="/webhooks")
+    #   from wabot.api.routers import admin
     #   app.include_router(admin.router, prefix="/admin")
 
 

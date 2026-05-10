@@ -1,21 +1,22 @@
 """Health and readiness probes.
 
 `/healthz` — liveness; returns 200 if the process is up.
-`/readyz`  — readiness; verifies that the database is reachable.
+`/readyz`  — readiness; verifies that the database and Redis are reachable.
 
-Later phases will extend `/readyz` to probe Redis and the broker. The
-response shape (`HealthResponse`) is stable; new dependency-status
-fields will be additive.
+The response shape (`HealthResponse`) is stable; new dependency-status
+fields are additive.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
 from wabot import __version__
+from wabot.cache import redis_ping
 from wabot.data.db import ping as db_ping
 from wabot.infra.config import get_settings
 
@@ -24,6 +25,7 @@ router = APIRouter(tags=["health"])
 
 class DependencyStatus(BaseModel):
     db: bool
+    redis: bool
 
 
 class HealthResponse(BaseModel):
@@ -56,11 +58,9 @@ async def healthz() -> HealthResponse:
 
 @router.get("/readyz", response_model=HealthResponse)
 async def readyz(response: Response) -> HealthResponse:
-    db_ok = await db_ping()
-    if not db_ok:
+    db_ok, redis_ok = await asyncio.gather(db_ping(), redis_ping())
+    deps = DependencyStatus(db=db_ok, redis=redis_ok)
+    if not (db_ok and redis_ok):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return _build_health_response(
-            dependencies=DependencyStatus(db=False),
-            status_label="degraded",
-        )
-    return _build_health_response(dependencies=DependencyStatus(db=True))
+        return _build_health_response(dependencies=deps, status_label="degraded")
+    return _build_health_response(dependencies=deps)

@@ -13,6 +13,8 @@ import signal
 from contextlib import suppress
 from typing import NoReturn
 
+from wabot.adapters.broker import close_broker
+from wabot.cache import close_redis, get_redis
 from wabot.data.db import dispose_engine, get_engine
 from wabot.infra.config import get_settings
 from wabot.infra.logging import configure_logging, get_logger
@@ -24,6 +26,7 @@ async def _run() -> None:
     settings = get_settings()
     configure_logging(settings)
     get_engine(settings)
+    get_redis(settings)
     logger.info(
         "wabot.worker.start",
         broker=settings.broker_backend,
@@ -40,6 +43,8 @@ async def _run() -> None:
     try:
         await stop.wait()
     finally:
+        await close_broker()
+        await close_redis()
         await dispose_engine()
         logger.info("wabot.worker.stop")
 
