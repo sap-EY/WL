@@ -14,7 +14,7 @@
 | 1    | Config, logging, correlation                     | ✅ Done | structlog JSON + `X-Correlation-Id` middleware + stable error envelope wired |
 | 2    | DB models + Alembic                              | ✅ Done | ORM mapped, Alembic env + idempotent `0001_init`, seed script, /readyz now pings DB |
 | 3    | Interakt webhook ingestion                       | ✅ Done | Shared-secret URL handler, two-layer dedupe (Redis SET NX EX + DB partial unique index), Redis Streams broker port, /readyz now probes Redis too |
-| 4    | Webhook normalizer + canonical event             | ⬜ Not started | |
+| 4    | Webhook normalizer + canonical event             | ✅ Done | `CanonicalInboundEvent` (frozen, extra=forbid) + Interakt normalizer; pure, deterministic; 14 unit tests covering all 6 event variants, QR/CTA click discrimination, callback chain |
 | 5    | Orchestrator + per-user lock + free-text router  | ⬜ Not started | Use Redis `user:{full_phone}` snapshot |
 | 6    | Outbound dispatcher + Interakt adapter           | ⬜ Not started | `fullPhoneNumber`, `callbackData` mandatory |
 | 7    | User registration journey engine                 | ⬜ Not started | |
@@ -35,7 +35,7 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 2. **User**: `pip install -e ".[dev]"` → `pre-commit install` → `pytest` (47 unit tests should pass).
 3. **User**: `docker compose build && docker compose up` → verify `http://127.0.0.1:8000/healthz` returns 200 and `/readyz` returns 200 once Postgres + Redis are up.
 4. **User**: expose the API publicly for Interakt with `cloudflared tunnel --url http://localhost:8000`, then register the resulting URL inside Interakt as `https://<tunnel>/webhooks/{INTERAKT_WEBHOOK_PATH_SECRET}/interakt`.
-5. Move into **Phase 4** (webhook normalizer + canonical event).
+5. Move into **Phase 5** (orchestrator + per-user lock + free-text router). The inbound worker (`src/wabot/workers/inbound_worker.py`) currently idles; Phase 5 wires it to consume the Redis stream, load the raw row, call `wabot.adapters.interakt.normalize`, acquire the `user:{full_phone}` Redis lock, and dispatch into journey handlers.
 
 ---
 
@@ -101,6 +101,28 @@ Append a dated entry whenever a phase moves forward. Keep entries short (what sh
   ```
 
 <!-- New entries go below this line. Newest first. -->
+
+### 2026-05-10 — Phase 4 complete (webhook normalizer + canonical event)
+- **Domain model** (`src/wabot/domain/events.py`):
+  - `EventKind(StrEnum)` with 8 values: `USER_TEXT`, `USER_BUTTON_REPLY`, `USER_LIST_REPLY`, `OUTBOUND_SENT`, `OUTBOUND_DELIVERED`, `OUTBOUND_READ`, `OUTBOUND_FAILED`, `OUTBOUND_CLICKED`. Convenience sets `USER_EVENT_KINDS` / `OUTBOUND_STATUS_KINDS` for journey routing.
+  - `CanonicalInboundEvent(BaseModel)` is `model_config = ConfigDict(extra="forbid", frozen=True)` — closed shape, immutable, downstream code can hash/compare freely. Carries `correlation_id`, `raw_event_id`, `event_kind`, `interakt_message_id`, `interakt_customer_id`, `full_phone_number`, `text`, `button_text`, `click_type` (`Literal["QR","CTA"]`), `callback_data`, `referenced_outbound_message_id` (UUID-validated), `failure_reason`, `received_at` (microsecond UTC).
+- **Adapter** (`src/wabot/adapters/interakt/normalizer.py`): pure function `normalize(*, raw_event_id, correlation_id, payload) -> CanonicalInboundEvent`. **Single source of truth** for Interakt's wire format — every downstream consumer reads only the canonical event.
+  - Coerces the raw payload through `InteraktEnvelope.model_validate` (defensive — raises `NormalizationError` not `ValidationError` so the worker has one exception class to catch).
+  - Required routing fields: `data.message.id` and a derivable phone (channel_phone_number || country_code+phone). Missing → `NormalizationError`.
+  - **Click discrimination** is dual-shape:
+    - **CTA**: top-level `event.click_type == "CTA"`, `event.callbackData`, `event.button_text`.
+    - **QR**: `data.message.meta_data.click_type == "QR"`, label deep under `meta_data.button_payload.payload.text`, `callbackData` lives at `meta_data.source_data.callback_data`.
+  - **callbackData precedence**: top-level `event.callbackData` → `meta_data.source_data.callback_data` → `meta_data.callbackData` (defensive). The CTA path *intentionally* wins over the QR/status path because Interakt mirrors stale values into `meta_data` for click events.
+  - **`referenced_outbound_message_id`** parses the documented `"{outbound_message_id}|{correlation_id}"` contract via strict UUID validation on the head; non-UUID heads (free-form template callbacks) silently produce `None` rather than raising — keeps journey handlers safe from third-party templates.
+  - **`received_at`** prefers `data.message.received_at_utc` (microsecond), falls back to top-level `timestamp`, final fallback `datetime.now(UTC)`. ISO parser tolerates trailing `Z` and naive UTC strings.
+  - Unknown free-text content type → `USER_TEXT` with `text=None` rather than raising; the raw row remains on disk for audit. Truly unknown event types (`type` not in the documented set) → `UnsupportedEventTypeError` (subclass of `NormalizationError`) so the worker can choose to mark-as-processed without retry.
+- **Tests** (`tests/unit/test_normalizer.py`): 14 cases — text/QR-button/CTA-click happy paths, all 4 status events parametrised, failure-reason carry-through, country-code phone fallback, callback chain UUID parsing (valid/free-form/non-UUID-head), missing-id and missing-phone error paths, unsupported-type error.
+- **Validation**: pytest 61/61 green; pre-commit (ruff, ruff-format, black, mypy, bandit) all clean. Zero `# type: ignore` and zero per-file mypy waivers added.
+- **Decisions**:
+  - Canonical event is `frozen=True` deliberately — handlers can't accidentally mutate fields the orchestrator depends on, and equality is structural.
+  - `EventKind` is a `StrEnum` (not a `Literal`) so `match`/`isinstance` arms can use the enum members directly and logs show readable values.
+  - The normalizer is **pure**: no time, no DB, no I/O, no logging side-effects. Logging belongs to the worker (Phase 5) so the same code path is testable end-to-end against any orchestrator.
+- **Next**: Phase 5 — orchestrator. Replace `inbound_worker._run` body with: read from Redis stream → load `webhook_event_raw` row → `normalize(...)` → acquire `user:{full_phone}` Redis lock → dispatch by `event_kind` to the journey state machine. Mark row `processed_at` once the journey commits.
 
 ### 2026-05-10 — Phase 3 complete (Interakt webhook ingestion)
 - **Cache layer** (`src/wabot/cache/`):
