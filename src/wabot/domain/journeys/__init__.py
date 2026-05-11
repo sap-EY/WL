@@ -34,12 +34,19 @@ from wabot.domain.journeys.base import (
     reset_handlers_for_tests,
 )
 
+# Importing the concrete handler modules has the side-effect of
+# registering them in the handler registry (see each module's
+# `register_journey_handler(...)` call at the bottom). This keeps the
+# registry wired without any explicit bootstrap call from the worker.
+from wabot.domain.journeys.registration import RegistrationJourneyHandler
+
 __all__ = [
     "JourneyHandler",
     "JourneyResult",
     "NoopJourneyHandler",
     "NoopOutboundStatusHandler",
     "OutboundStatusHandler",
+    "RegistrationJourneyHandler",
     "get_journey_handler",
     "get_outbound_status_handler",
     "register_journey_handler",

@@ -87,6 +87,9 @@ class AppSettings(_Base):
     template_locale: str = Field(default="en", alias="TEMPLATE_LOCALE")
     support_contact_value: str = Field(default="+91-XXXXXXXXXX", alias="SUPPORT_CONTACT_VALUE")
 
+    # --- Registration journey ----------------------------------------------
+    registration_max_retries: int = Field(default=2, alias="REGISTRATION_MAX_RETRIES")
+
     # --- GenAI --------------------------------------------------------------
     genai_base_url: str = Field(default="", alias="GENAI_BASE_URL")
     genai_api_key: SecretStr = Field(default=SecretStr(""), alias="GENAI_API_KEY")
