@@ -43,8 +43,11 @@ class MessageSymbol(StrEnum):
     MSG_REG_ASSISTED_SUPPORT = "MSG_REG_ASSISTED_SUPPORT"
 
     # Registered journey ---------------------------------------------------
+    MSG_REGISTERED_CONSENT_ACK = "MSG_REGISTERED_CONSENT_ACK"
+    MSG_REGISTERED_CONSENT_DECLINED = "MSG_REGISTERED_CONSENT_DECLINED"
     MSG_REGISTERED_ICEBREAKER = "MSG_REGISTERED_ICEBREAKER"
     MSG_REGISTERED_ACK_THINKING = "MSG_REGISTERED_ACK_THINKING"
+    MSG_REGISTERED_ANSWER_TEXT = "MSG_REGISTERED_ANSWER_TEXT"
     MSG_REGISTERED_ANSWER_WITH_BUTTONS = "MSG_REGISTERED_ANSWER_WITH_BUTTONS"
     MSG_REGISTERED_FALLBACK_CHOOSE_OPTION = "MSG_REGISTERED_FALLBACK_CHOOSE_OPTION"
     MSG_REGISTERED_FALLBACK_GENAI_FAILED = "MSG_REGISTERED_FALLBACK_GENAI_FAILED"
@@ -119,10 +122,27 @@ CATALOG: dict[MessageSymbol, CatalogEntry] = {
         kind="BUTTONS",
         text="Welcome aboard! How can we help you today?",
     ),
+    MessageSymbol.MSG_REGISTERED_CONSENT_ACK: CatalogEntry(
+        symbol=MessageSymbol.MSG_REGISTERED_CONSENT_ACK,
+        kind="TEXT",
+        text="Thanks for accepting. You're all set.",
+    ),
+    MessageSymbol.MSG_REGISTERED_CONSENT_DECLINED: CatalogEntry(
+        symbol=MessageSymbol.MSG_REGISTERED_CONSENT_DECLINED,
+        kind="TEXT",
+        text=(
+            "No problem. If you change your mind, just send us a message and "
+            "we'll share the consent form again."
+        ),
+    ),
     MessageSymbol.MSG_REGISTERED_ACK_THINKING: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_ACK_THINKING,
         kind="TEXT",
         text="Got it \u2014 looking that up for you, please wait.",
+    ),
+    MessageSymbol.MSG_REGISTERED_ANSWER_TEXT: CatalogEntry(
+        symbol=MessageSymbol.MSG_REGISTERED_ANSWER_TEXT,
+        kind="TEXT",
     ),
     MessageSymbol.MSG_REGISTERED_ANSWER_WITH_BUTTONS: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_ANSWER_WITH_BUTTONS,

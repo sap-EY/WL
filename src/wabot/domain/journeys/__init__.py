@@ -38,6 +38,7 @@ from wabot.domain.journeys.base import (
 # registering them in the handler registry (see each module's
 # `register_journey_handler(...)` call at the bottom). This keeps the
 # registry wired without any explicit bootstrap call from the worker.
+from wabot.domain.journeys.registered import RegisteredJourneyHandler
 from wabot.domain.journeys.registration import RegistrationJourneyHandler
 
 __all__ = [
@@ -46,6 +47,7 @@ __all__ = [
     "NoopJourneyHandler",
     "NoopOutboundStatusHandler",
     "OutboundStatusHandler",
+    "RegisteredJourneyHandler",
     "RegistrationJourneyHandler",
     "get_journey_handler",
     "get_outbound_status_handler",
