@@ -29,9 +29,11 @@ from contextlib import suppress
 from typing import NoReturn
 
 from wabot.adapters.broker import close_broker, get_broker
+from wabot.adapters.genai import FakeGenAIPort
 from wabot.adapters.interakt import InteraktClient
 from wabot.cache import close_redis, get_redis
 from wabot.data.db import dispose_engine, get_engine
+from wabot.domain.ports.genai import register_genai_port
 from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.logging import configure_logging, get_logger
 from wabot.services.orchestrator import Orchestrator
@@ -97,6 +99,13 @@ async def _run() -> None:
     interakt_client = InteraktClient(settings, redis_client=redis)
     pipeline = OutboundPipeline(client=interakt_client)
     orchestrator = Orchestrator(settings, pipeline=pipeline)
+    if settings.use_fake_genai:
+        # Local shake-out only: register the in-process fake GenAI
+        # port so the Registered journey free-text branches can be
+        # exercised without a live GenAI backend. Phase 9 replaces
+        # this with a real httpx adapter.
+        register_genai_port(FakeGenAIPort())
+        logger.warning("wabot.worker.fake_genai_enabled")
     logger.info(
         "wabot.worker.start",
         broker=settings.broker_backend,

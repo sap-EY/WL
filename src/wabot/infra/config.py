@@ -97,6 +97,11 @@ class AppSettings(_Base):
     genai_timeout_read_seconds: float = Field(default=20.0, alias="GENAI_TIMEOUT_READ_SECONDS")
     genai_circuit_fail_threshold: int = Field(default=5, alias="GENAI_CIRCUIT_FAIL_THRESHOLD")
     genai_circuit_window_seconds: int = Field(default=60, alias="GENAI_CIRCUIT_WINDOW_SECONDS")
+    # Local-only convenience: when true, the worker registers a fake
+    # GenAI port at boot so the Registered journey free-text flow can
+    # be exercised end-to-end without a real GenAI backend. NEVER set
+    # this in any deployed environment.
+    use_fake_genai: bool = Field(default=False, alias="WABOT_USE_FAKE_GENAI")
 
     # --- Broker -------------------------------------------------------------
     broker_backend: BrokerBackend = Field(default="redis_streams", alias="BROKER_BACKEND")
