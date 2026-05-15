@@ -32,6 +32,7 @@ EVENT_TYPE_API_DELIVERED = "message_api_delivered"
 EVENT_TYPE_API_READ = "message_api_read"
 EVENT_TYPE_API_FAILED = "message_api_failed"
 EVENT_TYPE_API_CLICKED = "message_api_clicked"
+EVENT_TYPE_API_FLOW_RESPONSE = "message_api_flow_response"
 
 KNOWN_EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -41,6 +42,7 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset(
         EVENT_TYPE_API_READ,
         EVENT_TYPE_API_FAILED,
         EVENT_TYPE_API_CLICKED,
+        EVENT_TYPE_API_FLOW_RESPONSE,
     }
 )
 

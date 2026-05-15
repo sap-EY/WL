@@ -94,12 +94,17 @@ def build_template(
     header_values: Sequence[str] | None = None,
     button_values: Mapping[str, Sequence[str]] | None = None,
     file_name: str | None = None,
+    is_flow_template: bool = False,
 ) -> OutboundIntent:
     """Build a TEMPLATE intent.
 
     `template_name` is the Interakt code-name (resolved from settings
     by the caller \u2014 see `AppSettings.template_*`). The catalog entry
     only validates that the symbol *is* a template.
+
+    Set ``is_flow_template=True`` for templates whose CTA opens a
+    WhatsApp Flow form (no flow_token / flow_action_data required \u2014
+    the form is pre-configured in Interakt).
     """
     _entry_for(symbol, "TEMPLATE")
     return OutboundIntent(
@@ -114,6 +119,7 @@ def build_template(
             {k: tuple(v) for k, v in button_values.items()} if button_values is not None else None
         ),
         file_name=file_name,
+        is_flow_template=is_flow_template,
     )
 
 

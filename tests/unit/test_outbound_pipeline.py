@@ -183,3 +183,62 @@ def test_idempotency_key_deterministic() -> None:
 def test_kind_passes_through() -> None:
     # Sanity-check that OutboundKind round-trips.
     assert OutboundKind.TEXT.value == "TEXT"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_logs_outbound_conversation_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a successful send, the pipeline writes an OUTBOUND
+    `conversation_message` row and touches the active session."""
+    row = _FakeRow(uuid.uuid4())
+    fake_repo = _FakeRepo(row)
+    fake_session = MagicMock()
+    fake_session.get = AsyncMock(return_value=row)
+    _patch_session(monkeypatch, fake_session)
+    monkeypatch.setattr(pipeline_mod, "OutboundRepository", lambda _s: fake_repo)
+
+    conv_session_id = uuid.uuid4()
+    log_outbound_mock = AsyncMock()
+    touch_mock = AsyncMock()
+
+    class _RecordingConvRepo:
+        def __init__(self, _session: Any) -> None:
+            return
+
+        async def get_or_create_active_session(self, _doctor_id: uuid.UUID) -> Any:
+            return type("_S", (), {"id": conv_session_id})()
+
+        log_inbound = AsyncMock()
+        log_outbound = log_outbound_mock
+        touch = touch_mock
+
+    monkeypatch.setattr(pipeline_mod, "ConversationRepository", _RecordingConvRepo)
+
+    client = MagicMock()
+    client.send = AsyncMock(
+        return_value=InteraktSendResult(interakt_message_id="ix-7", raw_response={})
+    )
+    pipe = OutboundPipeline(client=client)
+
+    doctor_id = uuid.uuid4()
+    correlation_id = str(uuid.uuid4())
+    intent = _intent(symbol="MSG_CONV", text="hello body")
+
+    results = await pipe.dispatch(
+        [intent],
+        doctor_id=doctor_id,
+        state_when_sent="REGISTERED_AWAITING_FREE_TEXT",
+        correlation_id=correlation_id,
+        conversation_session_id=conv_session_id,
+    )
+
+    assert results[0].status is OutboundStatus.SENT
+    log_outbound_mock.assert_awaited_once()
+    kwargs = log_outbound_mock.await_args.kwargs
+    assert kwargs["session_id"] == conv_session_id
+    assert kwargs["doctor_id"] == doctor_id
+    assert kwargs["text"] == "hello body"
+    assert kwargs["interakt_msg_id"] == "ix-7"
+    assert kwargs["callback_data"] == f"{row.id}|{correlation_id}"
+    touch_mock.assert_awaited_once_with(conv_session_id)

@@ -6,17 +6,13 @@ DB or transport scaffolding.
 """
 
 from wabot.domain.parsers.registration import (
-    REGISTRATION_FIELD_COUNT,
-    REGISTRATION_FIELDS,
     ParsedRegistration,
     RegistrationParseError,
-    parse_registration,
+    parse_form_response,
 )
 
 __all__ = [
-    "REGISTRATION_FIELDS",
-    "REGISTRATION_FIELD_COUNT",
     "ParsedRegistration",
     "RegistrationParseError",
-    "parse_registration",
+    "parse_form_response",
 ]

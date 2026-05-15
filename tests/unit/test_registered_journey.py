@@ -205,7 +205,7 @@ async def test_consent_accept_transitions_and_sends_icebreaker(
     handler = RegisteredJourneyHandler()
     doctor = _doctor()
     result = await handler.handle(
-        event=_event(button_text="Accept", event_kind=EventKind.USER_BUTTON_REPLY),
+        event=_event(button_text="Let's Continue", event_kind=EventKind.USER_BUTTON_REPLY),
         decision=_decision_case_b(),
         journey=_journey(RegisteredState.CONSENT_PENDING),
         doctor=doctor,
@@ -229,7 +229,7 @@ async def test_consent_decline_records_and_replies(
 ) -> None:
     handler = RegisteredJourneyHandler()
     result = await handler.handle(
-        event=_event(button_text="Decline", event_kind=EventKind.USER_BUTTON_REPLY),
+        event=_event(button_text="No, thanks", event_kind=EventKind.USER_BUTTON_REPLY),
         decision=_decision_case_b(),
         journey=_journey(RegisteredState.CONSENT_PENDING),
         doctor=_doctor(),
@@ -289,13 +289,14 @@ async def test_consent_declined_reentry_sends_template(
 
 
 @pytest.mark.asyncio
-async def test_icebreaker_ask_question_transitions_to_awaiting_free_text() -> None:
-    handler = RegisteredJourneyHandler()
+async def test_icebreaker_free_text_flows_into_genai(
+    _patch_repos: dict[str, Any],
+) -> None:
+    handler = RegisteredJourneyHandler(
+        genai_port=_ScriptedGenAIPort(response=_genai_non_scientific())
+    )
     result = await handler.handle(
-        event=_event(
-            button_text="Ask a question",
-            event_kind=EventKind.USER_BUTTON_REPLY,
-        ),
+        event=_event(text="What is paracetamol?", event_kind=EventKind.USER_TEXT),
         decision=_decision_case_b(),
         journey=_journey(RegisteredState.CONSENT_ACCEPTED),
         doctor=_doctor(),
@@ -307,11 +308,11 @@ async def test_icebreaker_ask_question_transitions_to_awaiting_free_text() -> No
 
 
 @pytest.mark.asyncio
-async def test_icebreaker_talk_to_hotline_sends_hotline_template() -> None:
+async def test_icebreaker_call_hotline_sends_hotline_template() -> None:
     handler = RegisteredJourneyHandler()
     result = await handler.handle(
         event=_event(
-            button_text="Talk to hotline",
+            button_text="Call hotline",
             event_kind=EventKind.USER_BUTTON_REPLY,
         ),
         decision=_decision_case_b(),

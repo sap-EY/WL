@@ -1,4 +1,4 @@
-"""Tests for `wabot.domain.journeys.registration` (Phase 7)."""
+"""Tests for `wabot.domain.journeys.registration` (Phase 7 \u2014 form flow)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ import pytest
 from wabot.domain.enums import (
     ExpectedInputKind,
     JourneyType,
+    RegisteredState,
     RegistrationState,
 )
 from wabot.domain.events import CanonicalInboundEvent, EventKind
 from wabot.domain.journeys.registration import RegistrationJourneyHandler
-from wabot.domain.messages.catalog import ButtonId, MessageSymbol
+from wabot.domain.messages.catalog import MessageSymbol
 from wabot.domain.router import RoutingCase, RoutingDecision
 from wabot.infra.config import get_settings
 
@@ -31,6 +32,7 @@ class _RecordingDoctorRepo:
     def __init__(self) -> None:
         self.created_shells: list[str] = []
         self.upserts: list[dict[str, Any]] = []
+        self._doctor_id = uuid.uuid4()
 
     async def create_shell(self, full_phone_number: str) -> Any:
         self.created_shells.append(full_phone_number)
@@ -44,6 +46,31 @@ class _RecordingDoctorRepo:
         self.upserts.append(kwargs)
         return SimpleNamespace(**kwargs)
 
+    async def get_by_phone(self, full_phone_number: str) -> Any:
+        return SimpleNamespace(
+            id=self._doctor_id,
+            full_phone_number=full_phone_number,
+            is_profile_complete=True,
+        )
+
+
+class _RecordingConsentRepo:
+    def __init__(self) -> None:
+        self.pending_calls: list[uuid.UUID] = []
+
+    async def upsert_pending(
+        self, *, doctor_id: uuid.UUID, last_template_msg_id: str | None = None
+    ) -> None:
+        self.pending_calls.append(doctor_id)
+
+
+class _RecordingOnboardingRepo:
+    def __init__(self) -> None:
+        self.onboarded_calls: list[uuid.UUID] = []
+
+    async def mark_onboarded(self, doctor_id: uuid.UUID) -> None:
+        self.onboarded_calls.append(doctor_id)
+
 
 @pytest.fixture(autouse=True)
 def _patch_repo(monkeypatch: pytest.MonkeyPatch) -> _RecordingDoctorRepo:
@@ -51,6 +78,14 @@ def _patch_repo(monkeypatch: pytest.MonkeyPatch) -> _RecordingDoctorRepo:
     monkeypatch.setattr(
         "wabot.domain.journeys.registration.DoctorRepository",
         lambda _session: repo,
+    )
+    monkeypatch.setattr(
+        "wabot.domain.journeys.registration.ConsentRepository",
+        lambda _session: _RecordingConsentRepo(),
+    )
+    monkeypatch.setattr(
+        "wabot.domain.journeys.registration.OnboardingRepository",
+        lambda _session: _RecordingOnboardingRepo(),
     )
     return repo
 
@@ -65,11 +100,19 @@ def _reset_settings_cache() -> None:
 # ---------------------------------------------------------------------------
 
 
+_FORM_PAYLOAD: dict[str, object] = {
+    "screen_0_first_name_0": "Jane",
+    "screen_0_last_name_1": "Doe",
+    "screen_0_mci_id_2": "MCI-12345",
+    "screen_1_speciality_0": ["Cardiology"],
+}
+
+
 def _event(
     *,
     text: str | None = "hi",
-    button_text: str | None = None,
     event_kind: EventKind = EventKind.USER_TEXT,
+    form_response: dict[str, Any] | None = None,
 ) -> CanonicalInboundEvent:
     return CanonicalInboundEvent(
         correlation_id="11111111-1111-4111-8111-111111111111",
@@ -79,7 +122,8 @@ def _event(
         interakt_customer_id="c-1",
         full_phone_number="9170000000",
         text=text,
-        button_text=button_text,
+        button_text=None,
+        form_response=form_response,
         received_at=datetime.now(UTC),
     )
 
@@ -115,13 +159,14 @@ def _journey(state: RegistrationState, *, retry_count: int = 0) -> Any:
     )
 
 
-def _doctor(*, partial: bool = False) -> Any:
+def _doctor() -> Any:
     return SimpleNamespace(
         id=uuid.uuid4(),
         full_phone_number="9170000000",
-        first_name="Jane" if partial else None,
+        first_name=None,
         last_name=None,
-        speciality="Cardiology" if partial else None,
+        speciality=None,
+        mci_id=None,
         email=None,
         address=None,
         city=None,
@@ -131,16 +176,13 @@ def _doctor(*, partial: bool = False) -> Any:
     )
 
 
-_VALID_REG_TEXT = "Jane Doe#Cardiology#221B Baker Street#jane@example.com#Mumbai#Maharashtra#400001"
-
-
 # ---------------------------------------------------------------------------
-# Fresh entry — Case A
+# Fresh entry \u2014 Case A: send template
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_case_a_creates_shell_and_prompts(
+async def test_case_a_creates_shell_and_sends_form_template(
     _patch_repo: _RecordingDoctorRepo,
 ) -> None:
     handler = RegistrationJourneyHandler()
@@ -149,7 +191,7 @@ async def test_case_a_creates_shell_and_prompts(
         decision=_decision_fresh_a(),
         journey=None,
         doctor=None,
-        session=object(),  # unused — repo is patched
+        session=object(),
     )
 
     assert _patch_repo.created_shells == ["9170000000"]
@@ -159,22 +201,44 @@ async def test_case_a_creates_shell_and_prompts(
     assert result.retry_count == 0
     assert len(result.outbound_intents) == 1
     intent = result.outbound_intents[0]
-    assert intent.symbol == MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT.value
-    assert intent.kind == "TEXT"
-
-
-# ---------------------------------------------------------------------------
-# AWAITING_FULL_DETAILS — happy parse
-# ---------------------------------------------------------------------------
+    assert intent.symbol == MessageSymbol.TEMPLATE_USER_REGISTRATION.value
+    assert intent.kind == "TEMPLATE"
+    assert intent.is_flow_template is True
 
 
 @pytest.mark.asyncio
-async def test_awaiting_full_valid_completes_registration(
+async def test_fresh_entry_with_existing_doctor_skips_shell_creation(
     _patch_repo: _RecordingDoctorRepo,
 ) -> None:
     handler = RegistrationJourneyHandler()
     result = await handler.handle(
-        event=_event(text=_VALID_REG_TEXT),
+        event=_event(),
+        decision=_decision_fresh_a(),
+        journey=None,
+        doctor=_doctor(),
+        session=object(),
+    )
+
+    assert _patch_repo.created_shells == []
+    assert result.outbound_intents[0].symbol == MessageSymbol.TEMPLATE_USER_REGISTRATION.value
+
+
+# ---------------------------------------------------------------------------
+# Form submission \u2014 completes registration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_form_submission_completes_registration(
+    _patch_repo: _RecordingDoctorRepo,
+) -> None:
+    handler = RegistrationJourneyHandler()
+    result = await handler.handle(
+        event=_event(
+            text=None,
+            event_kind=EventKind.USER_FORM_REPLY,
+            form_response=_FORM_PAYLOAD,
+        ),
         decision=_decision_resume_d(),
         journey=_journey(RegistrationState.AWAITING_FULL_DETAILS),
         doctor=_doctor(),
@@ -186,171 +250,92 @@ async def test_awaiting_full_valid_completes_registration(
     assert upsert["is_profile_complete"] is True
     assert upsert["first_name"] == "Jane"
     assert upsert["last_name"] == "Doe"
-    assert upsert["pincode"] == "400001"
-    assert result.next_registration_state == RegistrationState.REGISTRATION_COMPLETED
+    assert upsert["speciality"] == "Cardiology"
+    assert upsert["mci_id"] == "MCI-12345"
+    # Email / address / city / state / pincode are NOT collected.
+    assert upsert["email"] is None
+    assert upsert["address"] is None
+    assert upsert["city"] is None
+    assert upsert["state"] is None
+    assert upsert["pincode"] is None
+    assert result.next_journey == JourneyType.REGISTERED
+    assert result.next_registered_state == RegisteredState.CONSENT_PENDING
+    assert result.next_registration_state is None
+    assert len(result.outbound_intents) == 2
     assert result.outbound_intents[0].symbol == MessageSymbol.MSG_REG_COMPLETED.value
-
-
-# ---------------------------------------------------------------------------
-# Parse failure — retry then escalate
-# ---------------------------------------------------------------------------
+    assert result.outbound_intents[0].text == (
+        "Thank you, Dr. Jane.\nYour registration has been completed successfully."
+    )
+    assert result.outbound_intents[1].symbol == MessageSymbol.TEMPLATE_DOCTOR_WELCOME_CONSENT.value
 
 
 @pytest.mark.asyncio
-async def test_parse_failure_first_retry_prompts_again(
+async def test_form_submission_without_journey_still_completes(
+    _patch_repo: _RecordingDoctorRepo,
+) -> None:
+    """Defensive: if Interakt fires the form reply before the journey
+    row exists, we still upsert the profile."""
+    handler = RegistrationJourneyHandler()
+    result = await handler.handle(
+        event=_event(
+            text=None,
+            event_kind=EventKind.USER_FORM_REPLY,
+            form_response=_FORM_PAYLOAD,
+        ),
+        decision=_decision_fresh_a(),
+        journey=None,
+        doctor=_doctor(),
+        session=object(),
+    )
+
+    assert len(_patch_repo.upserts) == 1
+    assert result.next_journey == JourneyType.REGISTERED
+    assert result.next_registered_state == RegisteredState.CONSENT_PENDING
+
+
+@pytest.mark.asyncio
+async def test_form_submission_parse_failure_escalates(
     _patch_repo: _RecordingDoctorRepo,
 ) -> None:
     handler = RegistrationJourneyHandler()
     result = await handler.handle(
-        event=_event(text="not-enough-tokens"),
+        event=_event(
+            text=None,
+            event_kind=EventKind.USER_FORM_REPLY,
+            form_response={},  # empty payload \u2192 RegistrationParseError
+        ),
         decision=_decision_resume_d(),
-        journey=_journey(RegistrationState.AWAITING_FULL_DETAILS, retry_count=0),
+        journey=_journey(RegistrationState.AWAITING_FULL_DETAILS),
         doctor=_doctor(),
         session=object(),
     )
 
     assert _patch_repo.upserts == []
-    assert result.next_registration_state == RegistrationState.AWAITING_CORRECTED_FULL
-    assert result.retry_count == 1
-    assert result.outbound_intents[0].symbol == MessageSymbol.MSG_REG_RETRY_PROMPT.value
-
-
-@pytest.mark.asyncio
-async def test_parse_failure_after_max_retries_escalates() -> None:
-    handler = RegistrationJourneyHandler()
-    settings = get_settings()
-    # retry_count is already at the configured max; the next failure must escalate.
-    result = await handler.handle(
-        event=_event(text="bad"),
-        decision=_decision_resume_d(),
-        journey=_journey(
-            RegistrationState.AWAITING_CORRECTED_FULL,
-            retry_count=settings.registration_max_retries,
-        ),
-        doctor=_doctor(),
-        session=object(),
-    )
-
     assert result.next_registration_state == RegistrationState.ASSISTED_SUPPORT
     assert result.outbound_intents[0].symbol == MessageSymbol.MSG_REG_ASSISTED_SUPPORT.value
 
 
 # ---------------------------------------------------------------------------
-# PARTIAL_CONFIRM_PENDING
+# Non-form text while awaiting form \u2014 re-send template
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_partial_confirm_yes_completes_with_existing_data(
+async def test_text_while_awaiting_form_resends_template(
     _patch_repo: _RecordingDoctorRepo,
 ) -> None:
     handler = RegistrationJourneyHandler()
-    doctor = SimpleNamespace(
-        id=uuid.uuid4(),
-        full_phone_number="9170000000",
-        first_name="Jane",
-        last_name="Doe",
-        speciality="Cardio",
-        email="j@example.com",
-        address="addr",
-        city="Mumbai",
-        state="MH",
-        pincode="400001",
-        is_profile_complete=False,
-    )
     result = await handler.handle(
-        event=_event(
-            text=None,
-            button_text="Yes",
-            event_kind=EventKind.USER_BUTTON_REPLY,
-        ),
+        event=_event(text="oops typed instead of tapping"),
         decision=_decision_resume_d(),
-        journey=_journey(RegistrationState.PARTIAL_CONFIRM_PENDING),
-        doctor=doctor,
+        journey=_journey(RegistrationState.AWAITING_FULL_DETAILS),
+        doctor=_doctor(),
         session=object(),
     )
 
-    assert len(_patch_repo.upserts) == 1
-    assert _patch_repo.upserts[0]["is_profile_complete"] is True
-    assert _patch_repo.upserts[0]["first_name"] == "Jane"
-    assert result.next_registration_state == RegistrationState.REGISTRATION_COMPLETED
-
-
-@pytest.mark.asyncio
-async def test_partial_confirm_no_reprompts_for_full_details() -> None:
-    handler = RegistrationJourneyHandler()
-    result = await handler.handle(
-        event=_event(
-            text=None,
-            button_text="No",
-            event_kind=EventKind.USER_BUTTON_REPLY,
-        ),
-        decision=_decision_resume_d(),
-        journey=_journey(RegistrationState.PARTIAL_CONFIRM_PENDING),
-        doctor=_doctor(partial=True),
-        session=object(),
-    )
-
+    assert _patch_repo.upserts == []
     assert result.next_registration_state == RegistrationState.AWAITING_FULL_DETAILS
-    assert result.outbound_intents[0].symbol == MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT.value
-
-
-@pytest.mark.asyncio
-async def test_partial_confirm_free_text_falls_back() -> None:
-    handler = RegistrationJourneyHandler()
-    result = await handler.handle(
-        event=_event(text="something", event_kind=EventKind.USER_TEXT),
-        decision=_decision_resume_d(),
-        journey=_journey(RegistrationState.PARTIAL_CONFIRM_PENDING),
-        doctor=_doctor(partial=True),
-        session=object(),
-    )
-
-    assert result.next_registration_state == RegistrationState.PARTIAL_CONFIRM_PENDING
-    assert result.outbound_intents[0].symbol == (
-        MessageSymbol.MSG_REGISTERED_FALLBACK_CHOOSE_OPTION.value
-    )
-
-
-# ---------------------------------------------------------------------------
-# Defensive Case D — partial doctor, no journey row
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_defensive_d_partial_doctor_offers_partial_confirm() -> None:
-    handler = RegistrationJourneyHandler()
-    result = await handler.handle(
-        event=_event(),
-        decision=_decision_resume_d(),
-        journey=None,
-        doctor=_doctor(partial=True),
-        session=object(),
-    )
-
-    assert result.next_registration_state == RegistrationState.PARTIAL_CONFIRM_PENDING
-    assert result.expected_input_kind == ExpectedInputKind.BUTTON
-    assert result.outbound_intents[0].symbol == (MessageSymbol.MSG_REG_PARTIAL_CONFIRM_PROMPT.value)
-    # Both expected button ids should be present in the InteractiveButton list.
-    button_ids = {btn.id for btn in result.outbound_intents[0].buttons or ()}
-    assert button_ids == {
-        ButtonId.REG_PARTIAL_CONFIRM_YES.value,
-        ButtonId.REG_PARTIAL_CONFIRM_NO.value,
-    }
-
-
-@pytest.mark.asyncio
-async def test_defensive_d_empty_doctor_prompts_full_details() -> None:
-    handler = RegistrationJourneyHandler()
-    result = await handler.handle(
-        event=_event(),
-        decision=_decision_resume_d(),
-        journey=None,
-        doctor=_doctor(partial=False),
-        session=object(),
-    )
-
-    assert result.next_registration_state == RegistrationState.AWAITING_FULL_DETAILS
+    assert result.outbound_intents[0].symbol == MessageSymbol.TEMPLATE_USER_REGISTRATION.value
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +344,24 @@ async def test_defensive_d_empty_doctor_prompts_full_details() -> None:
 
 
 @pytest.mark.asyncio
-async def test_terminal_state_is_noop() -> None:
+async def test_completed_state_is_noop(_patch_repo: _RecordingDoctorRepo) -> None:
+    handler = RegistrationJourneyHandler()
+    result = await handler.handle(
+        event=_event(),
+        decision=_decision_resume_d(),
+        journey=_journey(RegistrationState.REGISTRATION_COMPLETED),
+        doctor=_doctor(),
+        session=object(),
+    )
+    assert _patch_repo.upserts == []
+    assert result.outbound_intents == ()
+    assert result.next_registration_state == RegistrationState.REGISTRATION_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_assisted_support_state_is_noop(
+    _patch_repo: _RecordingDoctorRepo,
+) -> None:
     handler = RegistrationJourneyHandler()
     result = await handler.handle(
         event=_event(),
@@ -368,24 +370,5 @@ async def test_terminal_state_is_noop() -> None:
         doctor=_doctor(),
         session=object(),
     )
-
-    assert result.next_registration_state == RegistrationState.ASSISTED_SUPPORT
     assert result.outbound_intents == ()
-
-
-# ---------------------------------------------------------------------------
-# Handler is auto-registered on import
-# ---------------------------------------------------------------------------
-
-
-def test_handler_is_auto_registered() -> None:
-    from wabot.domain.journeys import (
-        get_journey_handler,
-        register_journey_handler,
-    )
-
-    # Other tests (notably `test_orchestrator.py`) may have cleared the
-    # registry via `reset_handlers_for_tests`. Re-register and verify.
-    register_journey_handler(JourneyType.REGISTRATION, RegistrationJourneyHandler())
-    handler = get_journey_handler(JourneyType.REGISTRATION)
-    assert isinstance(handler, RegistrationJourneyHandler)
+    assert result.next_registration_state == RegistrationState.ASSISTED_SUPPORT

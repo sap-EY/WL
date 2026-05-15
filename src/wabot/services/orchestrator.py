@@ -45,6 +45,7 @@ from wabot.cache.locks import UserLock, UserLockUnavailableError
 from wabot.data.db import session_scope
 from wabot.data.models.onboarding import WhatsappOnboardingStatus
 from wabot.data.models.webhook import WebhookEventRaw
+from wabot.data.repositories.conversation_repo import ConversationRepository
 from wabot.data.repositories.doctor_repo import DoctorRepository
 from wabot.data.repositories.journey_repo import JourneyRepository
 from wabot.domain.events import USER_EVENT_KINDS
@@ -90,6 +91,7 @@ class _DispatchPlan:
     doctor_id: uuid.UUID
     state_when_sent: str | None
     intents: tuple[OutboundIntent, ...]
+    conversation_session_id: uuid.UUID | None = None
 
 
 class Orchestrator:
@@ -149,6 +151,7 @@ class Orchestrator:
                         doctor_id=plan.doctor_id,
                         state_when_sent=plan.state_when_sent,
                         correlation_id=correlation_id,
+                        conversation_session_id=plan.conversation_session_id,
                     )
                 elif plan is not None and plan.intents:
                     log.info(
@@ -274,6 +277,50 @@ class Orchestrator:
             event_kind=event.event_kind.value,
         )
 
+    async def _log_inbound_message(
+        self,
+        *,
+        session: AsyncSession,
+        event: CanonicalInboundEvent,
+        doctor: Doctor,
+    ) -> uuid.UUID | None:
+        """Append the inbound message to ``conversation_message`` and
+        return the active session id (so outbound logging can reuse
+        it). Runs in a SAVEPOINT inside the orchestrator's
+        transaction: the doctor row is visible (same tx) and any
+        failure rolls back the savepoint without poisoning the
+        outer commit."""
+        try:
+            try:
+                correlation_uuid = uuid.UUID(event.correlation_id)
+            except (ValueError, AttributeError, TypeError):
+                correlation_uuid = None
+            text = event.text or event.button_text
+            payload: dict[str, Any] | None = (
+                {"form_response": event.form_response} if event.form_response is not None else None
+            )
+            async with session.begin_nested():
+                conv_repo = ConversationRepository(session)
+                conv_session = await conv_repo.get_or_create_active_session(doctor.id)
+                conv_session_id = conv_session.id
+                await conv_repo.log_inbound(
+                    session_id=conv_session_id,
+                    doctor_id=doctor.id,
+                    text=text,
+                    payload=payload,
+                    interakt_msg_id=event.interakt_message_id,
+                    correlation_id=correlation_uuid,
+                )
+                await conv_repo.touch(conv_session_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "wabot.orchestrator.conversation_log_failed",
+                error=str(exc),
+                doctor_id=str(doctor.id),
+            )
+            return None
+        return conv_session_id
+
     async def _persist_result(
         self,
         *,
@@ -334,11 +381,16 @@ class Orchestrator:
             to_state=to_state,
         )
         if not result.outbound_intents:
+            await self._log_inbound_message(session=session, event=event, doctor=doctor)
             return None
+        conversation_session_id = await self._log_inbound_message(
+            session=session, event=event, doctor=doctor
+        )
         return _DispatchPlan(
             doctor_id=doctor.id,
             state_when_sent=to_state,
             intents=result.outbound_intents,
+            conversation_session_id=conversation_session_id,
         )
 
 

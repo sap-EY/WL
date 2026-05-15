@@ -7,11 +7,12 @@ adapter:
 
 * Serialise an `OutboundIntent` (+ `callbackData`) to the right
   Interakt wire shape (`Text`, `InteractiveButton`, or `Template`).
-* Send it with the project-wide retry policy (network / 5xx
+* Send it with the project-wide retry policy (network / 5xx / 429
   retried via `tenacity`; 4xx surfaced as `InteraktPermanentError`).
-* Optional Redis-backed token bucket caps requests-per-second so we
-  never exceed the Interakt account TPS, even under burst from many
-  workers (\u00a79.4).
+
+We do NOT cap RPS on our side. Interakt enforces its own rate limit
+and signals via HTTP 429 \u2014 the retry loop handles backoff when that
+happens.
 
 Auth: `Authorization: Basic {INTERAKT_API_KEY}` exactly as documented
 \u2014 we do NOT base64-encode the configured key (Interakt issues an
@@ -21,7 +22,7 @@ already-encoded value; passing it through is the documented contract).
 from __future__ import annotations
 
 import asyncio
-import time
+import ssl
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -35,10 +36,13 @@ from tenacity import (
 
 from wabot.infra.logging import get_logger
 
+try:
+    import truststore
+except ImportError:  # pragma: no cover - truststore is a hard dep
+    truststore = None
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-    from redis.asyncio import Redis
 
     from wabot.domain.outbound import OutboundIntent
     from wabot.infra.config import AppSettings
@@ -46,8 +50,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _INTERAKT_SEND_PATH = "/v1/public/message/"
-_RATE_LIMIT_KEY_PREFIX = "wabot:interakt:rate:"
 _HTTP_BAD_REQUEST = 400
+_HTTP_TOO_MANY_REQUESTS = 429
 _HTTP_SERVER_ERROR = 500
 _HTTP_LIMIT = 600
 
@@ -85,14 +89,11 @@ class InteraktClient:
         settings: AppSettings,
         *,
         http_client: httpx.AsyncClient | None = None,
-        redis_client: Redis | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._settings = settings
         self._owns_http_client = http_client is None
         self._http = http_client or self._build_http_client(settings)
-        self._redis = redis_client
-        self._rate_limit_rps = max(1, settings.interakt_rate_limit_rps)
         self._sleep: Callable[[float], Awaitable[None]] = sleep or asyncio.sleep
 
     @staticmethod
@@ -103,9 +104,17 @@ class InteraktClient:
             write=settings.interakt_timeout_read_seconds,
             pool=settings.interakt_timeout_connect_seconds,
         )
+        # Use the OS trust store (Windows / macOS keychain / Linux CA
+        # bundle) instead of certifi so corporate MITM CAs installed
+        # in the system store are honored. Falls back gracefully if
+        # `truststore` is missing.
+        verify: Any = (
+            truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if truststore is not None else True
+        )
         return httpx.AsyncClient(
             base_url=settings.interakt_base_url.rstrip("/"),
             timeout=timeout,
+            verify=verify,
             headers={
                 "Authorization": f"Basic {settings.interakt_api_key.get_secret_value()}",
                 "Content-Type": "application/json",
@@ -133,7 +142,6 @@ class InteraktClient:
         `InteraktPermanentError` immediately.
         """
         body = build_request_body(intent, callback_data=callback_data)
-        await self._acquire_rate_token()
 
         async for attempt in AsyncRetrying(
             reraise=True,
@@ -157,6 +165,12 @@ class InteraktClient:
             msg = f"Interakt send failed at the transport layer: {exc!s}"
             raise InteraktTransientError(msg) from exc
 
+        if response.status_code == _HTTP_TOO_MANY_REQUESTS:
+            # Interakt-side rate limiting — retry with exponential
+            # backoff. We do NOT cap RPS on our side; we react when
+            # the provider tells us to slow down.
+            msg = f"Interakt send rate-limited (429): {response.text[:300]!r}"
+            raise InteraktTransientError(msg)
         if _HTTP_SERVER_ERROR <= response.status_code < _HTTP_LIMIT:
             msg = f"Interakt send returned {response.status_code}: {response.text[:300]!r}"
             raise InteraktTransientError(msg)
@@ -179,38 +193,6 @@ class InteraktClient:
             msg = f"Interakt send response missing 'id': {payload!r}"
             raise InteraktTransientError(msg)
         return InteraktSendResult(interakt_message_id=message_id, raw_response=payload)
-
-    # ------------------------------------------------------------------
-    # Rate limiting
-    # ------------------------------------------------------------------
-    async def _acquire_rate_token(self) -> None:
-        """Block until we are allowed to issue another request.
-
-        Uses a per-second Redis counter (`INCR` + `EXPIRE 2`). When
-        Redis is unavailable we skip the guard and log \u2014 we never
-        block outbound traffic on our own infra.
-        """
-        if self._redis is None:
-            return
-        now = int(time.time())
-        key = f"{_RATE_LIMIT_KEY_PREFIX}{now}"
-        try:
-            count = await self._redis.incr(key)
-            if count == 1:
-                await self._redis.expire(key, 2)
-        except Exception as exc:
-            logger.warning("wabot.interakt.rate_limit_redis_error", error=str(exc))
-            return
-        if count > self._rate_limit_rps:
-            sleep_for = 1.0 - (time.time() - now)
-            if sleep_for > 0:
-                logger.info(
-                    "wabot.interakt.rate_limit_wait",
-                    requested=count,
-                    rps=self._rate_limit_rps,
-                    sleep_seconds=round(sleep_for, 3),
-                )
-                await self._sleep(sleep_for)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +254,8 @@ def build_request_body(
             template["buttonValues"] = {k: list(v) for k, v in intent.button_values.items()}
         if intent.file_name is not None:
             template["fileName"] = intent.file_name
+        if intent.is_flow_template:
+            template["is_flow_template"] = True
         base["type"] = "Template"
         base["template"] = template
         return base

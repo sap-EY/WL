@@ -73,7 +73,6 @@ class AppSettings(_Base):
     interakt_timeout_read_seconds: float = Field(
         default=10.0, alias="INTERAKT_TIMEOUT_READ_SECONDS"
     )
-    interakt_rate_limit_rps: int = Field(default=80, alias="INTERAKT_RATE_LIMIT_RPS")
     interakt_webhook_path_secret: SecretStr = Field(
         default=SecretStr("change-me"), alias="INTERAKT_WEBHOOK_PATH_SECRET"
     )
@@ -84,6 +83,9 @@ class AppSettings(_Base):
         default="doctor_welcome_consent_v1", alias="TEMPLATE_DOCTOR_WELCOME_CONSENT"
     )
     template_hotline: str = Field(default="hotline_v1", alias="TEMPLATE_HOTLINE")
+    template_user_registration: str = Field(
+        default="user_registration_v1", alias="TEMPLATE_USER_REGISTRATION"
+    )
     template_locale: str = Field(default="en", alias="TEMPLATE_LOCALE")
     support_contact_value: str = Field(default="+91-XXXXXXXXXX", alias="SUPPORT_CONTACT_VALUE")
 

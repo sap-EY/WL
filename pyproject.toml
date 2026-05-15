@@ -30,6 +30,7 @@ dependencies = [
     # HTTP
     "httpx==0.28.1",
     "tenacity==9.1.4",
+    "truststore==0.10.4",
     # Observability
     "structlog==25.5.0",
     "orjson==3.11.9",
@@ -115,7 +116,7 @@ module = ["tests.*", "scripts.*"]
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ["redis.*"]
+module = ["redis.*", "truststore"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

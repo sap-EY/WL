@@ -375,209 +375,99 @@ Please try again after some time or use {{support}} for immediate assistance.
 ## 6) Journey 2 — User Registration
 
 ### 6.1 Purpose
-This journey is for:
-- completely new / unregistered doctors who start onboarding through QR-triggered or direct free-text WhatsApp entry
-- partially registered doctors whose record exists in user master data table but is incomplete
+This journey onboards doctors who are not yet fully registered. As of
+Phase 7 the registration handshake uses a **WhatsApp Flow form**
+delivered through a template message — the bot never asks for free-text
+hash-delimited details.
 
 ### 6.2 Entry Trigger
-The **user_registration** journey may start through any of these entry modes:
-- offline QR code opens WhatsApp with a **pre-filled message** such as `REGISTER_WL`
-- direct click-to-chat flow using the same pre-filled text
-- any other first free-text user message, if phone-number lookup and registration status determine that the user should be routed to registration
+The **user_registration** journey starts on the **first inbound
+message** from any phone whose `doctor` row is missing or has
+`is_profile_complete = false`. Entry can be:
+- offline-QR / click-to-chat with any pre-filled text (e.g. `REGISTER_WL`)
+- any free-text first message
+- any button reply that the router maps to Case A or Case D
 
-### 6.3 New User Path (Phone-number not present)
-- create a new internal record
-- send full registration details message
-- user submits all details
-- apply 2 retry limit for parsing
-- update DB
-- mark registration completed
-- initiate **registered_users** journey by sending consent template
+### 6.3 Registration Flow (single path)
+1. Bot sends the `user_registration_v1` template. The template carries a
+   single "Register Now" CTA that opens a WhatsApp Flow form inside the
+   chat. Journey state is parked at `AWAITING_FULL_DETAILS` (semantics:
+   "awaiting form submission").
+2. User fills the in-app form and taps **Submit**. Interakt posts a
+   `message_api_flow_response` webhook whose `data.message.message
+   .nfm_reply.response_json` carries one key per field.
+3. Backend upserts the doctor row with the submitted values, sets
+   `is_profile_complete = true`, transitions to
+   `REGISTRATION_COMPLETED`, and emits the success acknowledgement.
+4. The next router pass picks the registered-user consent template
+   (Journey 1 entry).
 
-### 6.4 Partial User Path (Phone-number present but incomplete)
-- fetch available data from master
-- send a confirmation text with **Yes / No** buttons asking whether existing data is correct
+There is **no partial-data confirmation step and no retry counter** —
+the Flow form is validated client-side by WhatsApp itself, so any
+parser failure on our end is treated as a malformed payload and the
+journey escalates to `ASSISTED_SUPPORT`.
 
-#### If user selects `Yes`
-- ask user to send **remaining/pending data only**
-- apply 2 retry limit
-- update DB with remaining data
-- complete registration
-- initiate **registered_users** journey by sending consent template
+### 6.4 Form Field Schema
+Configured in Interakt under flow id `985469590600160`:
 
-#### If user selects `No`
-- ask user to send **all correct details**
-- apply 2 retry limit
-- update DB with corrected full data
-- complete registration
-- initiate **registered_users** journey by sending consent template
+| Field        | Required | UI control     | Stored as            |
+| ------------ | -------- | -------------- | -------------------- |
+| First Name   | yes      | text           | `doctor.first_name`  |
+| Last Name    | yes      | text           | `doctor.last_name`   |
+| MCI-ID       | no       | text           | `doctor.mci_id`      |
+| Speciality   | yes      | multi-select   | `doctor.speciality` (comma-joined) |
+
+`email`, `address`, `city`, `state`, `pincode` are **not** collected by
+the form; the backend writes them as `NULL` so the columns remain
+available for future re-introduction without a schema change.
+
+Interakt prefixes each response-json key with `screen_<n>_`. The
+parser matches keys by **case-insensitive substring** so the screen
+layout can evolve inside Interakt without code edits.
 
 ### 6.5 Fully Registered User Path
-If lookup shows the user is already fully registered:
+If the lookup shows the doctor is already fully registered:
 - do not start registration
-- instead decide whether the user is already onboarded into WhatsApp registered-user journey
-  - if not onboarded → send consent + welcome flow
-  - if already onboarded → route directly to registered-user free-text handling flow
+- decide whether the user is already onboarded into the registered-user journey
+  - if not onboarded → send consent + welcome template
+  - if already onboarded → route directly to free-text handling
 
-### 6.6 Registration Data Collection Message (new user)
-**Message type:** Session text message
-
-**Draft text:**
+### 6.6 Registration Template Copy
+**Template name:** `user_registration_v1`
+**Template type:** Flow template (`is_flow_template = true`)
+**Body (illustrative):**
 ```text
 Hello Doctor 👋
 Welcome to Wockhardt Support 🩺
 
-To complete your registration, please reply with all your details in a single message, using "#" to separate each field, in this exact order:
-
-Full Name#Speciality#Address#Email#City#State#Pincode
-
-Example:
-Rahul Sharma#Cardiology#21 MG Road#rahul@email.com#Mumbai#Maharashtra#400001
-
-Note: You may include spaces within any field — leading and trailing spaces will be ignored. For Full Name, please send your first and last name separated by a space (e.g., Rahul Sharma).
+Tap "Register Now" to share your details in a quick in-app form.
 ```
+**CTA button:** `Register Now` → opens the Flow form described in §6.4.
 
-**Field rules:**
-- 7 fields, separated by `#`, in the exact order shown above.
-- `Full Name` is later split on the first whitespace into `first_name` and `last_name` for storage.
-- `Speciality` examples: Cardiology, Diabetes, Neurology, Radiology, etc. (free text accepted; normalization at parse time).
-- Leading/trailing whitespace on each token is trimmed before validation.
-
-### 6.7 Partial Data Confirmation Message
-If phone-number is present in master but record is incomplete, fetch available data and ask for confirmation.
-
-**Message type:** Session text message with buttons
-
-**Draft message text:**
-```text
-Hello Doctor 👋
-We found some details linked to your number:
-
-Name: {{name_if_available}}
-Speciality: {{speciality_if_available}}
-Address: {{address_if_available}}
-Email: {{email_if_available}}
-City: {{city_if_available}}
-State: {{state_if_available}}
-Pincode: {{pincode_if_available}}
-
-Are these details correct?
-```
-
-**Buttons:**
-- Yes
-- No
-
-### 6.8 If user selects `Yes` on partial-data confirmation
-**Message type:** Session text message
-
-**Draft text:**
-```text
-Thank you 🙏
-Please send the remaining details in a single message, separated by "#", in this order:
-
-{{pending_fields_in_order_joined_by_hash}}
-
-Example (for the missing fields above):
-{{pending_fields_example_joined_by_hash}}
-```
-
-### 6.9 If user selects `No` on partial-data confirmation
-**Message type:** Session text message
-
-**Draft text:**
-```text
-Thank you 🙏
-Please send all your correct details in a single message, using "#" to separate each field, in this exact order:
-
-Full Name#Speciality#Address#Email#City#State#Pincode
-
-Example:
-Rahul Sharma#Cardiology#21 MG Road#rahul@email.com#Mumbai#Maharashtra#400001
-```
-
-### 6.10 Registration Data Parsing / Validation
-The system shall parse the submitted registration details and validate at minimum:
-- non-empty mandatory fields
-- email format
-- pincode format
-- field count / expected layout
-- speciality is non-empty (free-text; later normalization is acceptable)
-
-**Parser contract (binding):**
-- Input is a single message split on `#`.
-- Expected token count: **7**, in this exact order:
-  1. Full Name
-  2. Speciality
-  3. Address
-  4. Email
-  5. City
-  6. State
-  7. Pincode
-- Each token is `.strip()`-ed (leading/trailing whitespace removed) before validation.
-- `Full Name` is then split once on the first whitespace into `first_name` and `last_name`. If only a single word is provided, treat it as `first_name` with `last_name` empty (validation may flag this).
-- The prompt and the parser must always evolve together.
-
-
-### 6.11 Incorrect Registration Detail Format (Retry 1)
-**Message type:** Session text message
-
-**Draft text:**
-```text
-Sorry, I could not process your details correctly.
-Please resend them in a single message, using "#" to separate each field, in this exact order:
-
-Full Name#Speciality#Address#Email#City#State#Pincode
-
-Example:
-Rahul Sharma#Cardiology#21 MG Road#rahul@email.com#Mumbai#Maharashtra#400001
-```
-
-### 6.12 Incorrect Registration Detail Format Again (Retry 2)
-**Message type:** Session text message
-
-**Draft text:**
-```text
-Sorry, we are still unable to process your details.
-Please contact {{support}} for assistance.
-```
-
-**Backend action:**
-- flag / hold / escalate for further action
-
-### 6.13 Registration Success
-**Message type:** Session text message
-
-**Draft text:**
+### 6.7 Registration Success Acknowledgement
+**Message type:** session text
 ```text
 Thank you {{Doctor Name}}.
 Your registration has been completed successfully.
 ```
+**Next step:** doctor becomes eligible for the registered-users
+journey; the consent template is sent on the next router pass.
 
-**Next step:**
-- doctor becomes eligible for the **registered_users** journey
-- send the registered-user consent template to start the next journey
+### 6.8 Assisted Support Fallback
+If the form response cannot be parsed (empty payload, missing required
+field) the bot transitions to `ASSISTED_SUPPORT` and sends:
+```text
+Sorry, we could not process your registration.
+Please contact {{support}} for assistance.
+```
 
-### 6.14 User Registration — Edge Cases
-The user-registration logic should explicitly handle the following edge cases:
-- user sends `REGISTER_WL` and phone-number is already fully registered
-- user sends any free text message and phone-number is not found in master
-- user sends any free text message and phone-number is found but record is partial
-- user sends any free text message and phone-number is fully registered
-- user changes field order
-- missing lines / incorrect formatting
-- address contains extra text or commas
-- invalid or missing email
-- partial response only
-- user types unrelated question instead of registration details
-- multiple spaces / special characters / local language text causing parse failure
-
-**Recommended backend handling:**
-- normalize spaces and line breaks
-- basic regex validation for email and pincode
-- if parse confidence is low, send fallback prompt
-- maximum 2 retries
-- after repeated failure, flag / route to assisted support
+### 6.9 User Registration — Edge Cases
+- user sends free text while in `AWAITING_FULL_DETAILS` → bot re-sends
+  the `user_registration_v1` template so the user can tap the CTA again
+- user submits the form before the journey row exists (Case A race) →
+  handler still upserts the profile and completes the journey
+- terminal states (`REGISTRATION_COMPLETED`, `ASSISTED_SUPPORT`) are
+  no-ops; the router picks a different journey on the next inbound
 
 ---
 
@@ -737,89 +627,55 @@ Consent stage:
 START
   |
   v
-User enters via REGISTER_WL or any first free-text input
+User enters via any first inbound message
   |
   v
-Lookup phone-number in master/client data
+Lookup phone-number in doctor table
   |
-  +--> [Not found]
+  +--> [Not found OR is_profile_complete = false]
   |         |
   |         v
-  |   Create new user record
+  |   (If not found) create new doctor shell row
   |         |
   |         v
-  |   Send full registration details message
+  |   Send `user_registration_v1` template (Flow form CTA)
   |         |
   |         v
-  |   User sends details
-  |         |
-  |         +--> max 2 retry limit
+  |   Journey state = AWAITING_FULL_DETAILS
   |         |
   |         v
-  |   Update DB
+  |   User taps "Register Now" and fills the in-app form
   |         |
   |         v
-  |   Registration completed
+  |   Interakt webhook: type=message_api_flow_response
   |         |
-  |         v
-  |   Trigger registered-users consent template
+  |         +--> [Parse failure (malformed/empty)]
+  |         |         |
+  |         |         v
+  |         |   Transition to ASSISTED_SUPPORT
+  |         |         |
+  |         |         v
+  |         |   Send "contact support" message and stop
+  |         |
+  |         +--> [Parse OK]
+  |                   |
+  |                   v
+  |             Upsert doctor row (first_name, last_name, mci_id,
+  |             speciality joined; email/address/city/state/pincode = NULL)
+  |                   |
+  |                   v
+  |             is_profile_complete = true
+  |                   |
+  |                   v
+  |             Send registration-success acknowledgement
+  |                   |
+  |                   v
+  |             Trigger registered-users consent template on next pass
   |
-  +--> [Found]
+  +--> [Found and is_profile_complete = true]
             |
             v
-    Is user fully registered?
-            |
-            +--> [Yes]
-            |         |
-            |         v
-            |   If not onboarded in WhatsApp journey, send consent + welcome flow
-            |   Else route directly to registered-user free-text flow
-            |
-            +--> [No]
-                      |
-                      v
-                Fetch partial data
-                      |
-                      v
-                Send confirmation message with Yes / No buttons
-                      |
-                      +--> [Yes]
-                      |         |
-                      |         v
-                      |   Ask for remaining pending details only
-                      |         |
-                      |         v
-                      |   User sends details
-                      |         |
-                      |         +--> max 2 retry limit
-                      |         |
-                      |         v
-                      |   Update DB with remaining data
-                      |         |
-                      |         v
-                      |   Registration completed
-                      |         |
-                      |         v
-                      |   Trigger registered-users consent template
-                      |
-                      +--> [No]
-                                |
-                                v
-                          Ask for all correct details
-                                |
-                                v
-                          User sends details
-                                |
-                                +--> max 2 retry limit
-                                |
-                                v
-                          Update DB with corrected data
-                                |
-                                v
-                          Registration completed
-                                |
-                                v
-                          Trigger registered-users consent template
+      Route to registered-users journey (Journey 1)
 ```
 
 ---
@@ -1028,10 +884,30 @@ These are still worth clarifying during implementation planning:
 ### User Registration
 - entry can happen from `REGISTER_WL` or any other free-text input
 - first step is always phone-number lookup in master data
-- new user → full registration
-- partial user → data confirmation + remaining/full data capture
-- fully registered user → directly start/continue registered-user journey
-- registration parsing uses max 2 retries
-- successful registration transitions user into registered-user journey
+- new user → fu (including Flow templates with `is_flow_template = true`)
+- send text session message
+- send text session message with buttons
+- send CTA-enabled template where supported
+- parse inbound webhook payload to common internal format, including
+  the `message_api_flow_response` event and the `nfm_reply.response_json`
+  body
+- log outbound response IDs and statuses
 
+### Rate limiting
+The orchestrator does **not** enforce a client-side request-per-second
+cap. Interakt is the source of truth for throughput; if the API
+returns HTTP `429 Too Many Requests` the client treats it as a
+transient error and retries with tenacity-driven exponential backoff.
+No Redis token bucket is used.
 ---
+happens from any first inbound message when the doctor row is
+  missing or `is_profile_complete = false`
+- bot sends `user_registration_v1` Flow template (single CTA opens an
+  in-app form)
+- form collects First Name (req), Last Name (req), MCI-ID (opt),
+  Speciality (req multi-select)
+- on Submit, backend upserts the profile (email / address / city /
+  state / pincode stored as NULL), marks registration complete, and
+  triggers the registered-users consent template
+- no partial-data confirmation step and no retry counter — malformed
+  payload escalates straight to assisted support

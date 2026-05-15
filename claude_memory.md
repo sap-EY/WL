@@ -17,7 +17,7 @@
 | 4    | Webhook normalizer + canonical event             | ✅ Done | `CanonicalInboundEvent` (frozen, extra=forbid) + Interakt normalizer; pure, deterministic; 14 unit tests covering all 6 event variants, QR/CTA click discrimination, callback chain |
 | 5    | Orchestrator + per-user lock + free-text router  | ✅ Done | `UserLock` (SET NX PX + watchdog + Lua release), Redis Streams consume API (XREADGROUP/XACK/ensure_consumer_group), pure router (Cases A–D), Orchestrator end-to-end pipeline, NoopJourney + NoopOutboundStatus handlers as defaults; 29 new unit tests (90 total) |
 | 6    | Outbound dispatcher + Interakt adapter           | ✅ Done | `OutboundIntent` + `InteractiveButton` (frozen pydantic); message catalog + pure builders; `InteraktClient` (httpx async + tenacity exp-jitter retry on 5xx/network, immediate fail on 4xx, optional Redis token-bucket rate guard); `OutboundPipeline` (deterministic `idempotency_key` → `create_pending` → `callbackData = {row.id}|{correlation_id}` → send → `mark_sent` / FAILED); orchestrator dispatches intents post-commit under user lock; 32 new unit tests (122 total) |
-| 7    | User registration journey engine                 | ✅ Done | `RegistrationJourneyHandler` covering Case A (new user) + Case D (resume / partial); pure '#'-separated parser (`domain/parsers/registration.py`) with email + 6-digit pincode regex and first-whitespace name splitter; max-2 retries (`REGISTRATION_MAX_RETRIES`) → `ASSISTED_SUPPORT` escalation; partial-confirm Yes/No buttons; handler auto-registers on `wabot.domain.journeys` import; 23 new unit tests (145 total) |
+| 7    | User registration journey engine                 | ✅ Done (revised) | Pivoted to **WhatsApp Flow form** (`user_registration_v1` template, flow id `985469590600160`). Handler sends Flow template on first inbound; user submits in-app form (First Name req, Last Name req, MCI-ID opt, Speciality req multi-select); backend upserts profile with `email/address/city/state/pincode = NULL`. Parser is `parse_form_response(response_json)` — substring-matches `screen_<n>_` prefixed keys; any parse failure → `ASSISTED_SUPPORT` (no retry counter, no partial-confirm). Added `doctor.mci_id TEXT` column + Alembic migration `0002_mci_id`. Webhook normalizer handles new `message_api_flow_response` event kind → `EventKind.USER_FORM_REPLY`. Client-side rate limit removed; 429 → tenacity transient retry. 161 unit tests green. |
 | 8    | Registered users journey engine + consent        | ✅ Done | `RegisteredJourneyHandler` covering all 7 `RegisteredState` branches (Case C trigger-consent, Accept/Decline, ice-breaker, AWAITING_FREE_TEXT GenAI loop, scientific vs non-scientific shaping, AWAITING_ANSWER_BUTTON Satisfied/Call hotline, hotline template send, declined-reentry); `GenAIPort` Protocol + `StubGenAIPort` (always raises `GenAIServiceError`) + module-level registry (`register_genai_port`/`get_genai_port`/`reset_genai_port_for_tests`); `ConsentRepository` + `OnboardingRepository`; 3 new `MessageSymbol`s (ACK / CONSENT_DECLINED / ANSWER_TEXT); 18 new unit tests (163 total) |
 | 9    | GenAI gateway (async)                            | ⬜ Not started | Worker awaits; never the webhook hot path |
 | 10   | Status webhook consumer                          | ⬜ Not started | |
@@ -56,7 +56,8 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 - **Retries everywhere** = exponential backoff with jitter via `tenacity`.
 - **STOP / UNSUBSCRIBE** keywords handled at the router level → set consent declined.
 - **Stale historical button click handling** uses `callbackData` chain, not a time window.
-- **Registration form (v2.1)**: 7 fields, `#`-delimited single message, order = `Full Name#Speciality#Address#Email#City#State#Pincode`. `Full Name` is split on first whitespace into `first_name` and `last_name`. `doctor` table stores `first_name`, `last_name`, `speciality` (no `full_name`).
+- **Registration form (v2.2 — current)**: WhatsApp Flow form delivered via `user_registration_v1` template (`is_flow_template = true`). Fields: `first_name` (req), `last_name` (req), `mci_id` (opt), `speciality` (req multi-select; backend joins with `", "`). `email/address/city/state/pincode` are left `NULL` to avoid major code changes; columns remain in schema for future re-introduction. No partial-confirm step and no retry counter — parse failure escalates straight to `ASSISTED_SUPPORT`.
+- **No client-side Interakt rate limit**: Interakt is the source of truth for throughput; `429 Too Many Requests` is reclassified as a transient error and retried via tenacity. No Redis token bucket. `INTERAKT_RATE_LIMIT_RPS` env removed.
 - **Repository instruction policy**: `.github/instructions.md` is now the default instruction file and requires `claude_memory.md` updates for every code change or significant decision.
 
 ---
@@ -76,6 +77,20 @@ Legend: ✅ done · 🟡 in progress · ⏳ blocked / waiting · ⬜ not started
 ## 4. Per-phase progress log
 
 Append a dated entry whenever a phase moves forward. Keep entries short (what shipped, what surprised, what's next).
+
+### 2026-05-10 — Phase 7 revised: WhatsApp Flow form registration
+- Replaced `#`-delimited free-text parser with a **Flow form** (`user_registration_v1`, flow id `985469590600160`).
+- Webhook plumbing: new `EVENT_TYPE_API_FLOW_RESPONSE = "message_api_flow_response"` in `api/schemas/interakt_webhook.py`; `EventKind.USER_FORM_REPLY` + `form_response: dict | None` on `CanonicalInboundEvent`; normalizer extracts `data.message.message.nfm_reply.response_json` (handles `message_received` envelopes that carry an `InteractiveFlowReply` body too).
+- `domain/parsers/registration.py` fully rewritten: `parse_form_response(response_json)` returns `ParsedRegistration(first_name, last_name, speciality, mci_id)`. Substring (case-insensitive) match against Interakt's `screen_<n>_<field>` keys; speciality multi-select joined with `", "`. No retry / partial-confirm logic.
+- `domain/journeys/registration.py` fully rewritten: Case A creates shell + sends Flow template (state `AWAITING_FULL_DETAILS`); `USER_FORM_REPLY` upserts profile (with `email/address/city/state/pincode = None`) → `REGISTRATION_COMPLETED` → `MSG_REG_COMPLETED`; parse failure → `ASSISTED_SUPPORT`; any other non-form inbound while awaiting form re-sends the template.
+- DB: new `doctor.mci_id TEXT` column. ORM updated, repo `upsert_profile` gained `mci_id` kwarg, `models.txt` §3 + new §13 idempotent ALTER, Alembic migration `migrations/versions/20260510_0002_add_mci_id.py`.
+- Outbound: `OutboundIntent.is_flow_template: bool` + `build_template(..., is_flow_template=True)`; client adds `"is_flow_template": true` to the template body.
+- Removed client-side rate limiting: dropped `INTERAKT_RATE_LIMIT_RPS`, `_RATE_LIMIT_KEY_PREFIX`, `_acquire_rate_token`, `redis_client` ctor arg. 429 is now an `InteraktTransientError` handled by tenacity exp-backoff retry. Inbound worker no longer passes `redis_client=` to the client.
+- Config: new `template_user_registration` setting (default `user_registration_v1`).
+- Catalog: new `MessageSymbol.TEMPLATE_USER_REGISTRATION` (kept old MSG_REG_* / partial-confirm button symbols as dead-but-harmless to avoid touching unrelated tests).
+- drive_webhook: new `flow <phone> <json>` subcommand for end-to-end simulation.
+- Tests: rewrote `tests/unit/test_registration_parser.py` and `tests/unit/test_registration_journey.py`; full suite is **161 passed**.
+- Pending: live retest on `919867401411`, then commit + push.
 
 ### 2026-05-07 — Plan v2 finalized
 - Updated `implementation_plan.md` with all v2 changes (see §22 of the plan for the full diff).

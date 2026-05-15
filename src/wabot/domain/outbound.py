@@ -73,3 +73,8 @@ class OutboundIntent(BaseModel):
     header_values: tuple[str, ...] | None = None
     button_values: dict[str, tuple[str, ...]] | None = None
     file_name: str | None = None
+    is_flow_template: bool = False
+    """When True, Interakt is told to render this template as a
+    WhatsApp Flow (form) launcher. The flow definition itself lives
+    inside the template configuration in Interakt — we only flip the
+    flag on the wire."""

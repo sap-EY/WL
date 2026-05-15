@@ -21,8 +21,8 @@ Examples:
   python scripts/drive_webhook.py text 9867401411 \
       "Test Doctor#Cardiology#221B Baker St#test@example.com#Mumbai#Maharashtra#400001"
 
-  # 3. Tap the consent 'Accept' button.
-  python scripts/drive_webhook.py button 9867401411 "Accept"
+  # 3. Tap the consent 'Let's continue' button.
+  python scripts/drive_webhook.py button 9867401411 "Let's continue"
 
   # 4. List of canned scenarios at a glance:
   python scripts/drive_webhook.py --list
@@ -123,6 +123,51 @@ def _button_reply_payload(phone: str, button_title: str) -> dict[str, Any]:
     }
 
 
+def _flow_response_payload(phone: str, response_json: dict[str, Any]) -> dict[str, Any]:
+    """Build a ``message_api_flow_response`` payload matching wa_form.txt."""
+    return {
+        "version": "1.0",
+        "timestamp": _now_iso(),
+        "type": "message_api_flow_response",
+        "data": {
+            "customer": _customer(phone),
+            "message": {
+                "id": str(uuid.uuid4()),
+                "chat_message_type": "CustomerMessage",
+                "channel_failure_reason": None,
+                "message_status": "Sent",
+                "received_at_utc": _now_iso(),
+                "delivered_at_utc": None,
+                "seen_at_utc": None,
+                "campaign_id": None,
+                "is_template_message": False,
+                "raw_template": None,
+                "channel_error_code": None,
+                "message_content_type": "InteractiveFlowReply",
+                "media_url": None,
+                "message": {
+                    "type": "nfm_reply",
+                    "nfm_reply": {
+                        "response_json": response_json,
+                        "body": "Sent",
+                        "name": "flow",
+                    },
+                },
+                "meta_data": {},
+            },
+            "source_template_message": {
+                "template_name": "user_registration_v1",
+                "campaign_id": None,
+                "callback_data": None,
+                "status": "Sent",
+                "is_campaign": False,
+                "message_type": "PublicApiMessage",
+            },
+            "flow_id": 985469590600160,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Canned scenarios — quick lookup table
 # ---------------------------------------------------------------------------
@@ -130,20 +175,26 @@ def _button_reply_payload(phone: str, button_title: str) -> dict[str, Any]:
 
 _SCENARIOS = (
     (
-        "text  <phone> 'hi'                             ",
-        "Case A: fresh inbound → registration prompt",
+        "text   <phone> 'hi'                                ",
+        "Case A: fresh inbound → user_registration_v1 template",
     ),
-    ("text  <phone> 'Name#Spec#Addr#email#City#State#Pincode'", "Submit 7-field registration"),
-    ("text  <phone> 'bad payload'                    ", "Trigger parse-failure retry"),
-    ("button <phone> 'Yes' / 'No'                    ", "Partial-confirm reply (Case D)"),
-    ("button <phone> 'Accept' / 'Decline'            ", "Consent template reply"),
-    ("button <phone> 'Ask a question'                ", "Ice-breaker → AWAITING_FREE_TEXT"),
-    ("button <phone> 'Talk to hotline'               ", "Ice-breaker → hotline template"),
     (
-        "text   <phone> 'What is the dose of paracetamol?'",
+        'flow   <phone> \'{"screen_0_first_name_0": "Jane", ...}\'',
+        "Form submission → registration completed",
+    ),
+    (
+        "button <phone> \"Let's continue\" / 'No, thanks'   ",
+        "Consent template reply",
+    ),
+    (
+        "button <phone> 'Call hotline'                      ",
+        "Ice-breaker → hotline template (or just send free text to talk to GenAI)",
+    ),
+    (
+        "text   <phone> 'What is the dose of paracetamol?'  ",
         "Scientific GenAI branch (needs WABOT_USE_FAKE_GENAI=true)",
     ),
-    ("button <phone> 'Satisfied' / 'Call hotline'    ", "Answer-button reply"),
+    ("button <phone> 'Satisfied' / 'Call hotline'        ", "Answer-button reply"),
 )
 
 
@@ -170,7 +221,7 @@ def _post(payload: dict[str, Any], *, host: str, port: int) -> int:
     print(f"POST {url}")
     print(json.dumps(payload, indent=2))
     response = httpx.post(url, json=payload, timeout=5.0)
-    print(f"\n→ {response.status_code} {response.reason_phrase}")
+    print(f"\n-> {response.status_code} {response.reason_phrase}")
     if response.content:
         try:
             print(json.dumps(response.json(), indent=2))
@@ -197,6 +248,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p_btn.add_argument("phone")
     p_btn.add_argument("button_title")
 
+    p_flow = sub.add_parser("flow", help="Send a WhatsApp Flow form submission")
+    p_flow.add_argument("phone")
+    p_flow.add_argument(
+        "response_json",
+        help=(
+            "JSON dict of form field -> value (Interakt prefixes the keys with "
+            "screen_<n>_). Example: "
+            '\'{"screen_0_first_name_0": "Jane", "screen_0_last_name_1": "Doe", '
+            '"screen_0_mci_id_2": "12345", "screen_0_speciality_3": ["Cardiology"]}\''
+        ),
+    )
+
     return parser.parse_args(argv)
 
 
@@ -208,6 +271,16 @@ def main(argv: list[str] | None = None) -> int:
         payload = _text_payload(args.phone, args.text)
     elif args.kind == "button":
         payload = _button_reply_payload(args.phone, args.button_title)
+    elif args.kind == "flow":
+        try:
+            parsed = json.loads(args.response_json)
+        except json.JSONDecodeError as exc:
+            print(f"Invalid JSON for response_json: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(parsed, dict):
+            print("response_json must decode to a JSON object", file=sys.stderr)
+            return 2
+        payload = _flow_response_payload(args.phone, parsed)
     else:  # pragma: no cover
         return 2
     return _post(payload, host=args.host, port=args.port)

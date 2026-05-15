@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 from wabot.adapters.interakt import InteraktPermanentError
 from wabot.data.db import session_scope
 from wabot.data.models.outbound import OutboundMessage
+from wabot.data.repositories.conversation_repo import ConversationRepository
 from wabot.data.repositories.outbound_repo import OutboundRepository
 from wabot.domain.enums import OutboundKind, OutboundStatus
 from wabot.infra.logging import get_logger
@@ -79,6 +80,7 @@ class OutboundPipeline:
         doctor_id: uuid.UUID,
         state_when_sent: str | None,
         correlation_id: str,
+        conversation_session_id: uuid.UUID | None = None,
     ) -> list[DispatchResult]:
         """Persist + send each intent in `intents` order.
 
@@ -101,6 +103,7 @@ class OutboundPipeline:
                     state_when_sent=state_when_sent,
                     correlation_id=correlation_id,
                     sequence=index,
+                    conversation_session_id=conversation_session_id,
                     log=log,
                 )
             )
@@ -114,6 +117,7 @@ class OutboundPipeline:
         state_when_sent: str | None,
         correlation_id: str,
         sequence: int,
+        conversation_session_id: uuid.UUID | None,
         log: object,
     ) -> DispatchResult:
         idempotency_key = compute_idempotency_key(
@@ -157,6 +161,14 @@ class OutboundPipeline:
         await self._mark_sent(
             outbound_id=outbound_id,
             interakt_message_id=send_result.interakt_message_id,
+        )
+        await self._log_conversation_outbound(
+            doctor_id=doctor_id,
+            conversation_session_id=conversation_session_id,
+            intent=intent,
+            interakt_message_id=send_result.interakt_message_id,
+            callback_data=callback_data,
+            correlation_id=correlation_id,
         )
         log.info(  # type: ignore[attr-defined]
             "wabot.outbound_pipeline.sent",
@@ -212,6 +224,46 @@ class OutboundPipeline:
                 outbound_id,
                 interakt_message_id=interakt_message_id,
                 sent_at=datetime.now(UTC),
+            )
+
+    async def _log_conversation_outbound(
+        self,
+        *,
+        doctor_id: uuid.UUID,
+        conversation_session_id: uuid.UUID | None,
+        intent: OutboundIntent,
+        interakt_message_id: str | None,
+        callback_data: str | None,
+        correlation_id: str,
+    ) -> None:
+        """Append an OUTBOUND row to `conversation_message`.
+
+        Best-effort: the message has already been sent over the wire,
+        so any DB failure here must NOT propagate.
+        """
+        try:
+            async with session_scope() as session:
+                conv_repo = ConversationRepository(session)
+                if conversation_session_id is not None:
+                    conv_session_id = conversation_session_id
+                else:
+                    conv_session = await conv_repo.get_or_create_active_session(doctor_id)
+                    conv_session_id = conv_session.id
+                await conv_repo.log_outbound(
+                    session_id=conv_session_id,
+                    doctor_id=doctor_id,
+                    text=intent.text,
+                    payload=intent.model_dump(mode="json"),
+                    interakt_msg_id=interakt_message_id,
+                    callback_data=callback_data,
+                    correlation_id=_safe_uuid(correlation_id),
+                )
+                await conv_repo.touch(conv_session_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "wabot.outbound_pipeline.conversation_log_failed",
+                error=str(exc),
+                doctor_id=str(doctor_id),
             )
 
     async def _mark_failed(

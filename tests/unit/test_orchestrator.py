@@ -92,6 +92,7 @@ def _broker_message(event_id: uuid.UUID, *, full_phone: str = "9170000000") -> I
 def _patch_lock_and_redis(monkeypatch: pytest.MonkeyPatch, lock_cls: type = _NoLock) -> None:
     monkeypatch.setattr(orch_mod, "UserLock", lock_cls)
     monkeypatch.setattr(orch_mod, "get_redis", lambda *a, **kw: MagicMock())
+    _patch_conversation_repo(monkeypatch)
 
 
 def _patch_session(monkeypatch: pytest.MonkeyPatch, session: Any) -> None:
@@ -111,6 +112,30 @@ def _make_session_with_raw_row(raw_row: Any) -> Any:
     session.get = AsyncMock(return_value=raw_row)
     session.execute = AsyncMock()
     return session
+
+
+def _patch_conversation_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the real `ConversationRepository` with a no-op so the
+    orchestrator-level tests don't have to script the conversation
+    table mocks."""
+
+    class _NoopConvRepo:
+        def __init__(self, _session: Any) -> None:
+            return
+
+        async def get_or_create_active_session(self, _doctor_id: uuid.UUID) -> Any:
+            return SimpleNamespace(id=uuid.uuid4())
+
+        async def log_inbound(self, **_: Any) -> None:
+            return None
+
+        async def log_outbound(self, **_: Any) -> None:
+            return None
+
+        async def touch(self, _session_id: uuid.UUID) -> None:
+            return None
+
+    monkeypatch.setattr(orch_mod, "ConversationRepository", _NoopConvRepo)
 
 
 def _settings() -> Any:
@@ -243,6 +268,90 @@ async def test_user_event_routes_to_journey_handler_and_persists(
     assert upsert_kwargs["state_registered"] is RegisteredState.AWAITING_FREE_TEXT
     assert upsert_kwargs["last_processed_event_id"] == canonical.interakt_message_id
     assert raw_row.processed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_user_event_logs_inbound_conversation_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the orchestrator wires `ConversationRepository.log_inbound`
+    and `.touch` on the active conversation session."""
+    _patch_lock_and_redis(monkeypatch)
+
+    raw_row = SimpleNamespace(
+        id=uuid.uuid4(),
+        payload={"type": "message_received"},
+        processed_at=None,
+    )
+    session = _make_session_with_raw_row(raw_row)
+    _patch_session(monkeypatch, session)
+
+    canonical = _canonical()
+    _patch_normalize(monkeypatch, canonical)
+
+    doctor = SimpleNamespace(
+        id=uuid.uuid4(),
+        full_phone_number=canonical.full_phone_number,
+        is_profile_complete=True,
+    )
+    doctor_repo = MagicMock()
+    doctor_repo.get_by_phone = AsyncMock(return_value=doctor)
+    monkeypatch.setattr(orch_mod, "DoctorRepository", lambda _s: doctor_repo)
+
+    journey_repo = MagicMock()
+    journey_repo.get = AsyncMock(return_value=None)
+    journey_repo.upsert = AsyncMock(return_value=SimpleNamespace())
+    journey_repo.append_history = AsyncMock(return_value=SimpleNamespace())
+    monkeypatch.setattr(orch_mod, "JourneyRepository", lambda _s: journey_repo)
+
+    monkeypatch.setattr(
+        orch_mod,
+        "_load_onboarding",
+        AsyncMock(return_value=SimpleNamespace(is_onboarded=True)),
+    )
+
+    # Replace the noop conversation repo from `_patch_lock_and_redis`
+    # with a recording one so we can assert wiring.
+    active_session_id = uuid.uuid4()
+    log_inbound_mock = AsyncMock()
+    touch_mock = AsyncMock()
+
+    class _RecordingConvRepo:
+        def __init__(self, _session: Any) -> None:
+            return
+
+        async def get_or_create_active_session(self, _doctor_id: uuid.UUID) -> Any:
+            return SimpleNamespace(id=active_session_id)
+
+        log_inbound = log_inbound_mock
+        log_outbound = AsyncMock()
+        touch = touch_mock
+
+    monkeypatch.setattr(orch_mod, "ConversationRepository", _RecordingConvRepo)
+
+    class _Handler:
+        async def handle(self, **_: Any) -> JourneyResult:
+            return JourneyResult(
+                next_journey=JourneyType.REGISTERED,
+                next_registered_state=RegisteredState.AWAITING_FREE_TEXT,
+                expected_input_kind=ExpectedInputKind.FREE_TEXT,
+            )
+
+    from wabot.domain.journeys import register_journey_handler
+
+    register_journey_handler(JourneyType.REGISTERED, _Handler())
+
+    orch = orch_mod.Orchestrator(_settings())
+    ok = await orch.handle_message(_broker_message(raw_row.id))
+
+    assert ok is True
+    log_inbound_mock.assert_awaited_once()
+    log_kwargs = log_inbound_mock.await_args.kwargs
+    assert log_kwargs["session_id"] == active_session_id
+    assert log_kwargs["doctor_id"] == doctor.id
+    assert log_kwargs["text"] == canonical.text
+    assert log_kwargs["interakt_msg_id"] == canonical.interakt_message_id
+    touch_mock.assert_awaited_once_with(active_session_id)
 
 
 @pytest.mark.asyncio

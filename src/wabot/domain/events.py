@@ -21,7 +21,7 @@ Design notes:
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,6 +38,7 @@ class EventKind(StrEnum):
     USER_TEXT = "user_text"
     USER_BUTTON_REPLY = "user_button_reply"
     USER_LIST_REPLY = "user_list_reply"
+    USER_FORM_REPLY = "user_form_reply"
     OUTBOUND_SENT = "outbound_sent"
     OUTBOUND_DELIVERED = "outbound_delivered"
     OUTBOUND_READ = "outbound_read"
@@ -50,6 +51,7 @@ USER_EVENT_KINDS: frozenset[EventKind] = frozenset(
         EventKind.USER_TEXT,
         EventKind.USER_BUTTON_REPLY,
         EventKind.USER_LIST_REPLY,
+        EventKind.USER_FORM_REPLY,
     }
 )
 """Inbound user-originated events. Drive journey state transitions."""
@@ -91,6 +93,15 @@ class CanonicalInboundEvent(BaseModel):
     referenced_outbound_message_id: UUID | None = None
 
     failure_reason: str | None = None
+    form_response: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Parsed WhatsApp Flow form payload (only set when "
+            "`event_kind == USER_FORM_REPLY`). Mirrors "
+            "`data.message.message.nfm_reply.response_json` from "
+            "Interakt's `message_api_flow_response` webhook."
+        ),
+    )
     received_at: datetime = Field(
         ...,
         description="Microsecond-precision UTC timestamp from Interakt's "

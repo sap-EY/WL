@@ -49,6 +49,7 @@ class DoctorRepository:
         state: str | None,
         pincode: str | None,
         is_profile_complete: bool,
+        mci_id: str | None = None,
     ) -> Doctor:
         doctor = await self.get_by_phone(full_phone_number)
         if doctor is None:
@@ -62,6 +63,7 @@ class DoctorRepository:
         doctor.city = city
         doctor.state = state
         doctor.pincode = pincode
+        doctor.mci_id = mci_id
         doctor.is_profile_complete = is_profile_complete
         if is_profile_complete and doctor.registration_completed_at is None:
             doctor.registration_completed_at = datetime.now(tz=UTC)

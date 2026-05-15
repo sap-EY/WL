@@ -56,8 +56,8 @@ logger = get_logger(__name__)
 # Consent template buttons echo their TITLE in `message_received`
 # (Interakt drops the reply-id for QR / quick-reply variants). The
 # titles below match the WhatsApp template configuration.
-_CONSENT_ACCEPT_TITLE = "Accept"
-_CONSENT_DECLINE_TITLE = "Decline"
+_CONSENT_ACCEPT_TITLE = "Let's Continue"
+_CONSENT_DECLINE_TITLE = "No, thanks"
 
 
 class RegisteredJourneyHandler:
@@ -231,6 +231,7 @@ class RegisteredJourneyHandler:
             )
             return _result_consent_accepted(
                 full_phone_number=event.full_phone_number,
+                doctor=doctor,
             )
         if title == _CONSENT_DECLINE_TITLE.lower():
             await consent_repo.set_status(
@@ -260,16 +261,12 @@ class RegisteredJourneyHandler:
         event: CanonicalInboundEvent,
         doctor: Doctor,
     ) -> JourneyResult:
+        # The ice-breaker template ships a SINGLE button: "Call hotline".
+        # The user is otherwise free to type their query directly —
+        # that goes straight into the GenAI free-text flow.
         if event.event_kind == EventKind.USER_BUTTON_REPLY and event.button_text:
             title = event.button_text.strip().lower()
-            if title == "ask a question":
-                return _result_text_simple(
-                    full_phone_number=event.full_phone_number,
-                    text="Sure — go ahead and type your question.",
-                    next_state=RegisteredState.AWAITING_FREE_TEXT,
-                    expected=ExpectedInputKind.FREE_TEXT,
-                )
-            if title == "talk to hotline":
+            if title == "call hotline":
                 return self._send_hotline_template(
                     full_phone_number=event.full_phone_number,
                     doctor=doctor,
@@ -388,9 +385,10 @@ class RegisteredJourneyHandler:
         if event.event_kind == EventKind.USER_BUTTON_REPLY and event.button_text:
             title = event.button_text.strip().lower()
             if title == "satisfied":
+                name = _doctor_display_name(doctor)
                 return _result_text_simple(
                     full_phone_number=event.full_phone_number,
-                    text="Great — let me know if you have another question.",
+                    text=f"Thank you, {name}.\nGlad I could help.",
                     next_state=RegisteredState.AWAITING_FREE_TEXT,
                     expected=ExpectedInputKind.FREE_TEXT,
                 )
@@ -449,18 +447,25 @@ def _safe_uuid(raw: str | None) -> _uuid.UUID | None:
         return None
 
 
-def _result_consent_accepted(*, full_phone_number: str) -> JourneyResult:
+def _result_consent_accepted(*, full_phone_number: str, doctor: Doctor) -> JourneyResult:
+    name = _doctor_display_name(doctor)
     ack = build_text(
         symbol=MessageSymbol.MSG_REGISTERED_CONSENT_ACK,
         full_phone_number=full_phone_number,
+        text_override=(f"Thank you, {name}.\nYour consent has been recorded successfully."),
     )
     icebreaker = build_buttons(
         symbol=MessageSymbol.MSG_REGISTERED_ICEBREAKER,
         full_phone_number=full_phone_number,
-        buttons=(
-            (ButtonId.REGISTERED_ASK_QUESTION, "Ask a question"),
-            (ButtonId.REGISTERED_TALK_TO_HOTLINE, "Talk to hotline"),
+        text_override=(
+            f"Thank you {name},\n"
+            "You can now start asking your product or medical information "
+            "queries here in chat, and I will assist you with the relevant "
+            "information.\U0001f60a\n"
+            "If you need immediate support, you may connect with hotline "
+            "support.\U0001f4de"
         ),
+        buttons=((ButtonId.REGISTERED_ICEBREAKER_CALL_HOTLINE, "Call hotline"),),
     )
     return JourneyResult(
         next_journey=JourneyType.REGISTERED,

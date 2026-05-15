@@ -55,6 +55,7 @@ class MessageSymbol(StrEnum):
     # Templates ------------------------------------------------------------
     TEMPLATE_DOCTOR_WELCOME_CONSENT = "TEMPLATE_DOCTOR_WELCOME_CONSENT"
     TEMPLATE_HOTLINE = "TEMPLATE_HOTLINE"
+    TEMPLATE_USER_REGISTRATION = "TEMPLATE_USER_REGISTRATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,61 +85,87 @@ CATALOG: dict[MessageSymbol, CatalogEntry] = {
         symbol=MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT,
         kind="TEXT",
         text=(
-            "Welcome! Please share your registration details in a single message, "
-            "separated by '#', in this order:\n"
-            "Full Name#Speciality#Address#Email#City#State#Pincode"
+            "Hello Doctor \U0001f44b\n"
+            "Welcome to Wockhardt Support \U0001fa7a\n\n"
+            "To complete your registration, please reply with all your details in a "
+            'single message, using "#" to separate each field, in this exact order:\n\n'
+            "Full Name#Speciality#Address#Email#City#State#Pincode\n\n"
+            "Example:\n"
+            "Rahul Sharma#Cardiology#21 MG Road#rahul@email.com#Mumbai#Maharashtra#400001\n\n"
+            "Note: You may include spaces within any field \u2014 leading and trailing "
+            "spaces will be ignored. For Full Name, please send your first and last "
+            "name separated by a space (e.g., Rahul Sharma)."
         ),
     ),
     MessageSymbol.MSG_REG_RETRY_PROMPT: CatalogEntry(
         symbol=MessageSymbol.MSG_REG_RETRY_PROMPT,
         kind="TEXT",
         text=(
-            "Sorry, we couldn't read all your details. Please resend in this exact format, "
-            "separated by '#':\nFull Name#Speciality#Address#Email#City#State#Pincode"
+            "Sorry, I could not process your details correctly.\n"
+            'Please resend them in a single message, using "#" to separate each '
+            "field, in this exact order:\n\n"
+            "Full Name#Speciality#Address#Email#City#State#Pincode\n\n"
+            "Example:\n"
+            "Rahul Sharma#Cardiology#21 MG Road#rahul@email.com#Mumbai#Maharashtra#400001"
         ),
     ),
     MessageSymbol.MSG_REG_REMAINING_FIELDS_PROMPT: CatalogEntry(
         symbol=MessageSymbol.MSG_REG_REMAINING_FIELDS_PROMPT,
         kind="TEXT",
-        text="Please share the remaining details to complete your registration.",
+        text=(
+            "Thank you \U0001f64f\n"
+            'Please send the remaining details in a single message, separated by "#".'
+        ),
     ),
     MessageSymbol.MSG_REG_PARTIAL_CONFIRM_PROMPT: CatalogEntry(
         symbol=MessageSymbol.MSG_REG_PARTIAL_CONFIRM_PROMPT,
         kind="BUTTONS",
-        text="We have partial details for you. Should we use what we have on file?",
+        text=(
+            "Hello Doctor \U0001f44b\n"
+            "We found some details linked to your number. Are these details correct?"
+        ),
     ),
     MessageSymbol.MSG_REG_COMPLETED: CatalogEntry(
         symbol=MessageSymbol.MSG_REG_COMPLETED,
         kind="TEXT",
-        text="Thanks, your registration is complete.",
+        text=("Thank you, Doctor.\nYour registration has been completed successfully."),
     ),
     MessageSymbol.MSG_REG_ASSISTED_SUPPORT: CatalogEntry(
         symbol=MessageSymbol.MSG_REG_ASSISTED_SUPPORT,
         kind="TEXT",
-        text=("We're connecting you with a support agent for assisted registration. Please wait."),
+        text=(
+            "Sorry, we are still unable to process your details.\n"
+            "Please contact our support team for assistance."
+        ),
     ),
     MessageSymbol.MSG_REGISTERED_ICEBREAKER: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_ICEBREAKER,
         kind="BUTTONS",
-        text="Welcome aboard! How can we help you today?",
+        text=(
+            "Thank you Doctor,\n"
+            "You can now start asking your product or medical information queries "
+            "here in chat, and I will assist you with the relevant information.\U0001f60a\n"
+            "If you need immediate support, you may connect with hotline support.\U0001f4de"
+        ),
     ),
     MessageSymbol.MSG_REGISTERED_CONSENT_ACK: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_CONSENT_ACK,
         kind="TEXT",
-        text="Thanks for accepting. You're all set.",
+        text=("Thank you, Doctor.\nYour consent has been recorded successfully."),
     ),
     MessageSymbol.MSG_REGISTERED_CONSENT_DECLINED: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_CONSENT_DECLINED,
         kind="TEXT",
         text=(
-            "No problem. If you change your mind, just send us a message and "
-            "we'll share the consent form again."
+            "Thank you, Doctor.\n"
+            "We will not continue with support messages at this time.\n"
+            "If you wish to connect with us later, please reach out to our support team."
         ),
     ),
     MessageSymbol.MSG_REGISTERED_ACK_THINKING: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_ACK_THINKING,
         kind="TEXT",
-        text="Got it \u2014 looking that up for you, please wait.",
+        text="Let me check that for you. Please wait a moment\u2026\u23f3",
     ),
     MessageSymbol.MSG_REGISTERED_ANSWER_TEXT: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_ANSWER_TEXT,
@@ -151,14 +178,19 @@ CATALOG: dict[MessageSymbol, CatalogEntry] = {
     MessageSymbol.MSG_REGISTERED_FALLBACK_CHOOSE_OPTION: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_FALLBACK_CHOOSE_OPTION,
         kind="TEXT",
-        text="Please choose one of the options shown above.",
+        text=(
+            "Sorry, Doctor \u2014 I didn\u2019t catch that.\n"
+            "Please choose one of the options given in the previous message."
+        ),
     ),
     MessageSymbol.MSG_REGISTERED_FALLBACK_GENAI_FAILED: CatalogEntry(
         symbol=MessageSymbol.MSG_REGISTERED_FALLBACK_GENAI_FAILED,
         kind="TEXT",
         text=(
-            "We're having trouble answering right now. Please try again in a moment "
-            "or tap the hotline option for live assistance."
+            "Sorry, Doctor.\n"
+            "I\u2019m unable to fetch the answer right now.\n"
+            "Please try again after some time or contact our support team for "
+            "immediate assistance."
         ),
     ),
     MessageSymbol.TEMPLATE_DOCTOR_WELCOME_CONSENT: CatalogEntry(
@@ -171,6 +203,11 @@ CATALOG: dict[MessageSymbol, CatalogEntry] = {
         kind="TEMPLATE",
         template_setting_attr="template_hotline",
     ),
+    MessageSymbol.TEMPLATE_USER_REGISTRATION: CatalogEntry(
+        symbol=MessageSymbol.TEMPLATE_USER_REGISTRATION,
+        kind="TEMPLATE",
+        template_setting_attr="template_user_registration",
+    ),
 }
 
 
@@ -180,8 +217,7 @@ CATALOG: dict[MessageSymbol, CatalogEntry] = {
 class ButtonId(StrEnum):
     REG_PARTIAL_CONFIRM_YES = "REG_PARTIAL_CONFIRM_YES"
     REG_PARTIAL_CONFIRM_NO = "REG_PARTIAL_CONFIRM_NO"
-    REGISTERED_ASK_QUESTION = "REGISTERED_ASK_QUESTION"
-    REGISTERED_TALK_TO_HOTLINE = "REGISTERED_TALK_TO_HOTLINE"
+    REGISTERED_ICEBREAKER_CALL_HOTLINE = "REGISTERED_ICEBREAKER_CALL_HOTLINE"
     REGISTERED_ANSWER_SATISFIED = "REGISTERED_ANSWER_SATISFIED"
     REGISTERED_ANSWER_CALL_HOTLINE = "REGISTERED_ANSWER_CALL_HOTLINE"
 

@@ -35,6 +35,7 @@ from wabot.api.schemas.interakt_webhook import (
     EVENT_TYPE_API_CLICKED,
     EVENT_TYPE_API_DELIVERED,
     EVENT_TYPE_API_FAILED,
+    EVENT_TYPE_API_FLOW_RESPONSE,
     EVENT_TYPE_API_READ,
     EVENT_TYPE_API_SENT,
     EVENT_TYPE_RECEIVED,
@@ -94,6 +95,15 @@ def normalize(
     event_type = envelope.type
     if event_type == EVENT_TYPE_RECEIVED:
         event_kind, text, button_text = _classify_received(envelope)
+        # Some `message_received` payloads carry InteractiveFlowReply
+        # form submissions instead of plain text / buttons (form was
+        # rendered inside a session message rather than a template
+        # send). Treat them identically to message_api_flow_response.
+        form_response = _extract_form_response(envelope)
+        if form_response is not None:
+            event_kind = EventKind.USER_FORM_REPLY
+            text = None
+            button_text = None
         return CanonicalInboundEvent(
             correlation_id=correlation_id,
             raw_event_id=raw_event_id,
@@ -107,6 +117,29 @@ def normalize(
             callback_data=callback_data,
             referenced_outbound_message_id=referenced_outbound,
             failure_reason=None,
+            form_response=form_response,
+            received_at=received_at,
+        )
+
+    if event_type == EVENT_TYPE_API_FLOW_RESPONSE:
+        form_response = _extract_form_response(envelope)
+        if form_response is None:
+            msg = "message_api_flow_response missing data.message.message.nfm_reply.response_json"
+            raise NormalizationError(msg)
+        return CanonicalInboundEvent(
+            correlation_id=correlation_id,
+            raw_event_id=raw_event_id,
+            event_kind=EventKind.USER_FORM_REPLY,
+            interakt_message_id=interakt_message_id,
+            interakt_customer_id=customer_id,
+            full_phone_number=full_phone_number,
+            text=None,
+            button_text=None,
+            click_type=None,
+            callback_data=callback_data,
+            referenced_outbound_message_id=referenced_outbound,
+            failure_reason=None,
+            form_response=form_response,
             received_at=received_at,
         )
 
@@ -322,6 +355,31 @@ def _extract_received_at(envelope: InteraktEnvelope, payload: Mapping[str, Any])
         if parsed is not None:
             return parsed
     return datetime.now(UTC)
+
+
+def _extract_form_response(envelope: InteraktEnvelope) -> dict[str, Any] | None:
+    """Extract `data.message.message.nfm_reply.response_json` if present.
+
+    Returns the parsed `response_json` dict on success, or ``None`` if
+    this envelope does not carry a WhatsApp Flow form submission. We do
+    NOT raise on shape drift here; the caller decides whether the
+    absence is an error (flow-response event type) or expected
+    (regular `message_received`).
+    """
+    msg = envelope.data.message
+    content_type = (msg.message_content_type or "").lower()
+    inner = msg.message
+    if not isinstance(inner, dict):
+        return None
+    if content_type and content_type != "interactiveflowreply":
+        return None
+    nfm = inner.get("nfm_reply")
+    if not isinstance(nfm, dict):
+        return None
+    response_json = nfm.get("response_json")
+    if not isinstance(response_json, dict):
+        return None
+    return dict(response_json)
 
 
 def _parse_iso8601(value: str) -> datetime | None:

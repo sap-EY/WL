@@ -30,6 +30,7 @@ class Doctor(Base):
     city: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str | None] = mapped_column(Text, nullable=True)
     pincode: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    mci_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_profile_complete: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )

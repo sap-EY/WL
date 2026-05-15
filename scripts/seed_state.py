@@ -35,9 +35,13 @@ from sqlalchemy import delete
 
 from wabot.data.db import dispose_engine, session_scope
 from wabot.data.models.consent import Consent, ConsentHistory
+from wabot.data.models.conversation import ConversationMessage, ConversationSession
 from wabot.data.models.doctor import Doctor
+from wabot.data.models.genai import GenAIInteraction
 from wabot.data.models.journey import JourneyState, JourneyStateHistory
 from wabot.data.models.onboarding import WhatsappOnboardingStatus
+from wabot.data.models.outbound import OutboundMessage
+from wabot.data.models.registration import PartialProfileConfirmation, RegistrationAttempt
 from wabot.data.repositories import DoctorRepository
 from wabot.infra.logging import configure_logging, get_logger
 
@@ -59,6 +63,22 @@ async def _clear_journey_and_consent(session, doctor_id: uuid.UUID) -> None:
     await session.execute(delete(Consent).where(Consent.doctor_id == doctor_id))
     await session.execute(
         delete(WhatsappOnboardingStatus).where(WhatsappOnboardingStatus.doctor_id == doctor_id)
+    )
+    # Non-CASCADE FKs to doctor.id — clear so the doctor row itself can
+    # be deleted in the `fresh` flow.
+    await session.execute(delete(OutboundMessage).where(OutboundMessage.doctor_id == doctor_id))
+    await session.execute(delete(GenAIInteraction).where(GenAIInteraction.doctor_id == doctor_id))
+    await session.execute(
+        delete(RegistrationAttempt).where(RegistrationAttempt.doctor_id == doctor_id)
+    )
+    await session.execute(
+        delete(PartialProfileConfirmation).where(PartialProfileConfirmation.doctor_id == doctor_id)
+    )
+    await session.execute(
+        delete(ConversationMessage).where(ConversationMessage.doctor_id == doctor_id)
+    )
+    await session.execute(
+        delete(ConversationSession).where(ConversationSession.doctor_id == doctor_id)
     )
 
 

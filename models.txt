@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS wabot.doctor (
     city                        TEXT,
     state                       TEXT,
     pincode                     VARCHAR(10),
+    mci_id                      TEXT,                          -- Medical Council of India registration id (optional, collected via Flow form)
     is_profile_complete         BOOLEAN NOT NULL DEFAULT FALSE,
     registration_completed_at   TIMESTAMPTZ(6),
     source                      TEXT NOT NULL DEFAULT 'whatsapp',
@@ -300,6 +301,13 @@ CREATE TABLE IF NOT EXISTS wabot.partial_profile_confirmation (
     responded_at    TIMESTAMPTZ(6),
     created_at      TIMESTAMPTZ(6) NOT NULL DEFAULT clock_timestamp()
 );
+
+-- =============================================================================
+-- 13. Idempotent migrations to apply on already-initialised databases
+-- =============================================================================
+-- Add `mci_id` column to wabot.doctor (Medical Council of India registration id,
+-- collected via the WhatsApp Flow form during user registration).
+ALTER TABLE wabot.doctor ADD COLUMN IF NOT EXISTS mci_id TEXT;
 
 -- =============================================================================
 -- End of schema. Run this entire script in DBeaver against the target database.

@@ -95,8 +95,8 @@ async def _run() -> None:
     settings = get_settings()
     configure_logging(settings)
     get_engine(settings)
-    redis = get_redis(settings)
-    interakt_client = InteraktClient(settings, redis_client=redis)
+    get_redis(settings)
+    interakt_client = InteraktClient(settings)
     pipeline = OutboundPipeline(client=interakt_client)
     orchestrator = Orchestrator(settings, pipeline=pipeline)
     if settings.use_fake_genai:

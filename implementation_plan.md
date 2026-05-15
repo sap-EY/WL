@@ -367,17 +367,36 @@ Both share modules; deployed as the same container image with different `CMD`. T
 - **Dependencies**: Phase 1.
 
 ### Phase 7 — User registration journey engine (M)
-- **Objective**: New user, partial user (Yes/No), full user, retries, escalation.
-- **Outputs**: `domain/parsers/registration.py`, `domain/journeys/registration.py`, repo updates.
+- **Objective**: Single-path onboarding via a WhatsApp Flow form. Bot
+  sends `user_registration_v1` template on first inbound from an
+  unregistered phone; user fills the in-app form; backend stores the
+  profile.
+- **Outputs**: `domain/parsers/registration.py`,
+  `domain/journeys/registration.py`, repo updates,
+  `migrations/versions/...add_mci_id.py`.
 - **Dependencies**: Phases 5–6.
+- **Form schema** (configured in Interakt, flow id `985469590600160`):
+  - `first_name` — required text
+  - `last_name`  — required text
+  - `mci_id`     — optional text (new `doctor.mci_id` column, see §13
+    of `models.txt`)
+  - `speciality` — required multi-select; backend joins values with
+    `", "` before storage
 - **Parser contract** (binding):
-  - Input: a single inbound text message split on `#`.
-  - Expected token count: **7**, in this exact order: `Full Name`, `Speciality`, `Address`, `Email`, `City`, `State`, `Pincode`.
-  - Each token is `.strip()`-ed (leading/trailing whitespace removed) before validation.
-  - `Full Name` is then split once on the first whitespace into `first_name` and `last_name`. A single-word value is stored as `first_name` with `last_name = NULL` (validation may flag this depending on business rules).
-  - `Speciality` is free text (e.g., Cardiology, Diabetes, Neurology, Radiology); only non-empty check at v1; normalization may be added later.
-  - Validations: non-empty mandatory tokens, email regex, pincode regex (6 digits for IN), exact field count.
-  - Prompt copy and parser MUST evolve together — both live next to each other in `domain/messages/catalog.py` and `domain/parsers/registration.py`.
+  - Input: `data.message.message.nfm_reply.response_json` dict from a
+    `message_api_flow_response` webhook.
+  - Keys are matched by **case-insensitive substring** against the
+    field markers (`first_name`, `last_name`, `mci_id`, `speciality`)
+    so Interakt's `screen_<n>_` prefix is transparent to us.
+  - Empty payload or any missing required field raises
+    `RegistrationParseError`, which the handler turns into an
+    `ASSISTED_SUPPORT` transition — there is **no retry counter and
+    no partial-data confirmation step**.
+  - `email`, `address`, `city`, `state`, `pincode` are persisted as
+    `NULL` (the columns remain in the schema for future use).
+- **Catalog symbols**: `TEMPLATE_USER_REGISTRATION` (Flow template,
+  `is_flow_template = true`), `MSG_REG_COMPLETED`,
+  `MSG_REG_ASSISTED_SUPPORT`.
 
 ### Phase 8 — Registered users journey engine + consent (L)
 - **Objective**: Welcome+consent template, accept/decline, ice-breaker (interactive button), free-text → GenAI loop, scientific vs non-scientific branches, hotline template, fallbacks.
@@ -586,7 +605,11 @@ Interakt does not deduplicate sends server-side. We compute an `idempotency_key 
   - Network errors / 5xx: **exponential backoff with jitter** — `min(2^n * 0.5s, 8s)` with ±20% jitter, max 4 tries (n=0..3) via `tenacity`.
   - 4xx: do **not** retry; mark message `FAILED`, surface to journey so the handler can choose a fallback.
 - Timeout: 5s connect, 10s read. Configurable.
-- **Rate limit guard**: a Redis token bucket (`interakt:bucket:{minute}`) so we never exceed Interakt account TPS. Default 80 req/s, env-tunable.
+- **Rate limiting**: the adapter does **not** enforce a client-side
+  request-per-second cap. Interakt's quota is the source of truth; a
+  `429 Too Many Requests` response is reclassified as a transient
+  error and retried under the same tenacity policy as 5xx/network
+  errors. No Redis token bucket is used.
 
 ### 9.5 Status correlation
 Webhook events `message_api_*` are joined back to `outbound_message` via `interakt_message_id` returned at send time. The status worker updates lifecycle columns: `sent_at`, `delivered_at`, `read_at`, `failed_at`, `failure_reason`, `clicked_at`, `clicked_button_text`.
