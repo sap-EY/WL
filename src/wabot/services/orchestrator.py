@@ -358,7 +358,6 @@ class Orchestrator:
                 result.expected_input_kind.value if result.expected_input_kind is not None else None
             ),
             expected_outbound_id=result.expected_outbound_id,
-            retry_count=result.retry_count,
             context=dict(result.context_patch),
             last_processed_event_id=event.interakt_message_id,
         )

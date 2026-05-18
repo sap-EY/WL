@@ -158,7 +158,6 @@ def _journey(state: RegisteredState) -> Any:
         state_registered=state,
         expected_input_kind=None,
         expected_outbound_id=None,
-        retry_count=0,
         context={},
     )
 

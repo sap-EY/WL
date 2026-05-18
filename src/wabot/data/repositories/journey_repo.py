@@ -40,7 +40,6 @@ class JourneyRepository:
         state_registered: RegisteredState | None = None,
         expected_input_kind: str | None = None,
         expected_outbound_id: uuid.UUID | None = None,
-        retry_count: int = 0,
         context: dict[str, Any] | None = None,
         last_processed_event_id: str | None = None,
     ) -> JourneyState:
@@ -53,7 +52,6 @@ class JourneyRepository:
                 state_registered=state_registered,
                 expected_input_kind=expected_input_kind,
                 expected_outbound_id=expected_outbound_id,
-                retry_count=retry_count,
                 context=context or {},
                 last_processed_event_id=last_processed_event_id,
             )
@@ -64,7 +62,6 @@ class JourneyRepository:
             row.state_registered = state_registered
             row.expected_input_kind = expected_input_kind
             row.expected_outbound_id = expected_outbound_id
-            row.retry_count = retry_count
             row.context = context or {}
             row.last_processed_event_id = last_processed_event_id
             row.version = row.version + 1

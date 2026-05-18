@@ -42,6 +42,22 @@ services:
     restart: unless-stopped
     command: ["/app/docker/entrypoints/worker.sh"]
 
+  status-worker:
+    image: wabot:dev
+    container_name: wabot-status-worker
+    env_file: .env
+    environment:
+      APP_ENV: local
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["/app/docker/entrypoints/status_worker.sh"]
+
   redis:
     image: redis:7.4.9-alpine
     container_name: wabot-redis

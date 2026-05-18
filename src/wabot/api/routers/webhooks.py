@@ -41,6 +41,13 @@ from pydantic import ValidationError
 
 from wabot.adapters.broker import BrokerEnqueueError, get_broker
 from wabot.api.schemas.interakt_webhook import (
+    EVENT_TYPE_API_CLICKED,
+    EVENT_TYPE_API_DELIVERED,
+    EVENT_TYPE_API_FAILED,
+    EVENT_TYPE_API_FLOW_RESPONSE,
+    EVENT_TYPE_API_READ,
+    EVENT_TYPE_API_SENT,
+    EVENT_TYPE_RECEIVED,
     KNOWN_EVENT_TYPES,
     InteraktEnvelope,
     WebhookAckResponse,
@@ -52,13 +59,25 @@ from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.correlation import get_current_correlation_id
 from wabot.infra.errors import ValidationFailedError
 from wabot.infra.logging import get_logger
+from wabot.infra.metrics import inc
 
 if TYPE_CHECKING:
-    from wabot.adapters.broker import InboundBroker
+    from wabot.adapters.broker import BrokerQueue, InboundBroker
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+_USER_EVENT_TYPES = frozenset({EVENT_TYPE_RECEIVED, EVENT_TYPE_API_FLOW_RESPONSE})
+_STATUS_EVENT_TYPES = frozenset(
+    {
+        EVENT_TYPE_API_SENT,
+        EVENT_TYPE_API_DELIVERED,
+        EVENT_TYPE_API_READ,
+        EVENT_TYPE_API_FAILED,
+        EVENT_TYPE_API_CLICKED,
+    }
+)
 
 
 def _check_secret(provided: str, settings: AppSettings) -> None:
@@ -75,7 +94,7 @@ def _check_secret(provided: str, settings: AppSettings) -> None:
     status_code=status.HTTP_200_OK,
     summary="Receive an Interakt webhook event",
 )
-async def receive_interakt_webhook(
+async def receive_interakt_webhook(  # noqa: PLR0915
     request: Request,
     response: Response,
     secret: Annotated[str, Path(min_length=1, max_length=256)],
@@ -104,6 +123,7 @@ async def receive_interakt_webhook(
     full_phone_number = envelope.full_phone_number
     message_status = envelope.message_status
     is_known = event_type in KNOWN_EVENT_TYPES
+    inc("wabot_webhook_received_total", labels={"type": event_type})
 
     # 1) Cache-level dedupe (best effort).
     dedupe_key = build_dedupe_key(
@@ -125,6 +145,7 @@ async def receive_interakt_webhook(
             interakt_message_id=interakt_message_id,
             message_status=message_status,
         )
+        inc("wabot_webhook_duplicate_total", labels={"type": event_type, "source": "redis"})
         return WebhookAckResponse(status="duplicate")
 
     # 2) DB persist (durable replay log + strong dedupe).
@@ -146,6 +167,7 @@ async def receive_interakt_webhook(
             error=str(exc),
         )
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        inc("wabot_webhook_persist_failed_total", labels={"type": event_type})
         return WebhookAckResponse(status="duplicate")
 
     if not is_new:
@@ -155,11 +177,13 @@ async def receive_interakt_webhook(
             interakt_message_id=interakt_message_id,
             event_id=event_id,
         )
+        inc("wabot_webhook_duplicate_total", labels={"type": event_type, "source": "db"})
         return WebhookAckResponse(status="duplicate", event_id=event_id)
 
     # 3) Broker enqueue (best effort once DB has accepted the row).
     if is_known:
-        broker: InboundBroker = get_broker(settings)
+        queue = _queue_for_event_type(event_type)
+        broker: InboundBroker = get_broker(settings, queue=queue)
         partition_key = full_phone_number or event_id
         broker_payload = {
             "event_id": event_id,
@@ -175,15 +199,37 @@ async def receive_interakt_webhook(
             # Row is durable; janitor/replay job will catch up. Still ack 200.
             logger.error(
                 "wabot.webhook.broker_enqueue_failed",
+                queue=queue,
                 event_type=event_type,
                 event_id=event_id,
                 error=str(exc),
             )
+            inc(
+                "wabot_webhook_enqueue_failed_total",
+                labels={"type": event_type, "queue": queue},
+            )
+        else:
+            logger.info(
+                "wabot.webhook.enqueued",
+                queue=queue,
+                event_type=event_type,
+                event_id=event_id,
+            )
+            inc("wabot_webhook_enqueued_total", labels={"type": event_type, "queue": queue})
     else:
         logger.info(
             "wabot.webhook.unknown_event_type_persisted",
             event_type=event_type,
             event_id=event_id,
         )
+        inc("wabot_webhook_unknown_type_total", labels={"type": event_type})
 
     return WebhookAckResponse(status="ok", event_id=event_id)
+
+
+def _queue_for_event_type(event_type: str) -> BrokerQueue:
+    if event_type in _USER_EVENT_TYPES:
+        return "inbound"
+    if event_type in _STATUS_EVENT_TYPES:
+        return "status"
+    return "inbound"

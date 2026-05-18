@@ -36,6 +36,8 @@ from wabot.data.db import dispose_engine, get_engine
 from wabot.domain.ports.genai import register_genai_port
 from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.logging import configure_logging, get_logger
+from wabot.infra.metrics import inc
+from wabot.infra.telemetry import configure_telemetry
 from wabot.services.orchestrator import Orchestrator
 from wabot.services.outbound_pipeline import OutboundPipeline
 
@@ -58,7 +60,7 @@ async def _consume_forever(
     orchestrator: Orchestrator,
     stop: asyncio.Event,
 ) -> None:
-    broker = get_broker(settings)
+    broker = get_broker(settings, queue="inbound")
     group = settings.broker_inbound_group
     consumer = _consumer_name(settings)
     await broker.ensure_consumer_group(group=group)
@@ -89,11 +91,16 @@ async def _consume_forever(
             ok = await orchestrator.handle_message(message)
             if ok:
                 await broker.ack(message_id=message.message_id)
+                inc("wabot_worker_messages_total", labels={"queue": "inbound", "outcome": "acked"})
+            else:
+                await broker.nack(message_id=message.message_id)
+                inc("wabot_worker_messages_total", labels={"queue": "inbound", "outcome": "retry"})
 
 
 async def _run() -> None:
     settings = get_settings()
     configure_logging(settings)
+    configure_telemetry(settings)
     get_engine(settings)
     get_redis(settings)
     interakt_client = InteraktClient(settings)

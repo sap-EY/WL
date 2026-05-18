@@ -32,6 +32,7 @@ from redis.exceptions import ResponseError
 from wabot.adapters.broker.base import (
     BrokerConsumeError,
     BrokerEnqueueError,
+    BrokerQueue,
     InboundBroker,
     InboundMessage,
 )
@@ -58,12 +59,15 @@ class RedisStreamsBroker(InboundBroker):
         self,
         *,
         client: Redis | None = None,
+        queue: BrokerQueue = "inbound",
         stream: str | None = None,
         maxlen: int = _DEFAULT_MAXLEN,
     ) -> None:
         settings = get_settings()
+        self._queue = queue
         self._client = client or get_redis(settings)
-        self._stream = stream or settings.broker_inbound_stream
+        self._stream = stream or settings.broker_stream_for(queue)
+        self._group = settings.broker_group_for(queue)
         self._maxlen = maxlen
 
     async def enqueue(self, *, partition_key: str, payload: dict[str, Any]) -> str:
@@ -80,6 +84,7 @@ class RedisStreamsBroker(InboundBroker):
         except Exception as exc:
             logger.error(
                 "wabot.broker.enqueue_failed",
+                queue=self._queue,
                 stream=self._stream,
                 partition_key=partition_key,
                 error=str(exc),
@@ -98,6 +103,7 @@ class RedisStreamsBroker(InboundBroker):
             )
             logger.info(
                 "wabot.broker.consumer_group_created",
+                queue=self._queue,
                 stream=self._stream,
                 group=group,
             )
@@ -108,6 +114,7 @@ class RedisStreamsBroker(InboundBroker):
                 return
             logger.error(
                 "wabot.broker.consumer_group_create_failed",
+                queue=self._queue,
                 stream=self._stream,
                 group=group,
                 error=str(exc),
@@ -134,6 +141,7 @@ class RedisStreamsBroker(InboundBroker):
         except Exception as exc:
             logger.error(
                 "wabot.broker.consume_failed",
+                queue=self._queue,
                 stream=self._stream,
                 group=group,
                 consumer=consumer,
@@ -152,19 +160,22 @@ class RedisStreamsBroker(InboundBroker):
         return messages
 
     async def ack(self, *, message_id: str) -> None:
-        settings = get_settings()
         try:
-            await self._client.xack(self._stream, settings.broker_inbound_group, message_id)
+            await self._client.xack(self._stream, self._group, message_id)
         except Exception as exc:
             # Failing to ack is recoverable (XPENDING + XAUTOCLAIM will
             # redeliver); log loudly and let the worker continue.
             logger.warning(
                 "wabot.broker.ack_failed",
+                queue=self._queue,
                 stream=self._stream,
-                group=settings.broker_inbound_group,
+                group=self._group,
                 message_id=message_id,
                 error=str(exc),
             )
+
+    async def nack(self, *, message_id: str) -> None:
+        del message_id
 
     async def close(self) -> None:
         # The Redis client is owned by `wabot.cache.client`; nothing to do here.

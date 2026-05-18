@@ -40,6 +40,7 @@ from wabot.domain.journeys.base import (
 # registry wired without any explicit bootstrap call from the worker.
 from wabot.domain.journeys.registered import RegisteredJourneyHandler
 from wabot.domain.journeys.registration import RegistrationJourneyHandler
+from wabot.domain.journeys.status import OutboundStatusWebhookHandler
 
 __all__ = [
     "JourneyHandler",
@@ -47,6 +48,7 @@ __all__ = [
     "NoopJourneyHandler",
     "NoopOutboundStatusHandler",
     "OutboundStatusHandler",
+    "OutboundStatusWebhookHandler",
     "RegisteredJourneyHandler",
     "RegistrationJourneyHandler",
     "get_journey_handler",

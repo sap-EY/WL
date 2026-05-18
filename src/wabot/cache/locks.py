@@ -22,11 +22,12 @@ from __future__ import annotations
 import asyncio
 import secrets
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from wabot.infra.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
     from types import TracebackType
 
     from redis.asyncio import Redis
@@ -145,7 +146,8 @@ class UserLock:
             with suppress(asyncio.CancelledError, Exception):
                 await self._watchdog
         try:
-            await self._redis.eval(_RELEASE_SCRIPT, 1, self._key, self._token)
+            release_result = self._redis.eval(_RELEASE_SCRIPT, 1, self._key, self._token)
+            await cast("Awaitable[Any]", release_result)
         except Exception as release_exc:
             logger.warning(
                 "wabot.lock.release_failed",
@@ -162,7 +164,8 @@ class UserLock:
             except TimeoutError:
                 pass
             try:
-                ok = await self._redis.pexpire(self._key, self._ttl_ms)
+                refresh_result = self._redis.pexpire(self._key, self._ttl_ms)
+                ok = await cast("Awaitable[bool]", refresh_result)
             except Exception as exc:
                 logger.warning(
                     "wabot.lock.refresh_failed",

@@ -1,7 +1,7 @@
-"""Free-text router (implementation_plan.md §6 Cases A-D).
+"""Free-text router (implementation_plan.md §6).
 
 Given an inbound user-originated event together with whatever the DB
-currently knows about the doctor (master record, journey state,
+currently knows about the doctor (doctor record, journey state,
 onboarding status), decide which **journey + initial state** the
 orchestrator should dispatch into.
 
@@ -41,12 +41,7 @@ if TYPE_CHECKING:
 
 
 class RoutingCase(StrEnum):
-    """Identifier for the four canonical routing branches.
-
-    These correspond verbatim to the cases in implementation_plan.md
-    §6 ("Free-text router runs phone-number lookup against master data
-    and branches into 4 cases").
-    """
+    """Identifier for the implemented routing branches."""
 
     A_UNKNOWN_USER = "case_a_unknown_user"
     """Phone is not in `doctor`. Start a new registration journey."""
@@ -57,8 +52,8 @@ class RoutingCase(StrEnum):
     C_TRIGGER_CONSENT = "case_c_trigger_consent"
     """Profile complete but never onboarded. Send the consent template."""
 
-    D_RESUME_REGISTRATION = "case_d_resume_registration"
-    """Profile incomplete. Resume the registration journey where it stopped."""
+    RESUME_REGISTRATION = "resume_registration"
+    """Active registration journey exists. Resume it where it stopped."""
 
     NON_USER_EVENT = "non_user_event"
     """Status / click event - caller routes to the outbound-status updater."""
@@ -69,12 +64,12 @@ class RoutingDecision:
     """Result of `route_user_event` consumed by the orchestrator.
 
     Attributes:
-        case: Which Case A-D this is, for observability.
+        case: Which route branch this is, for observability.
         journey: Which top-level journey the handler dispatch table
             should index into.
         initial_registration_state / initial_registered_state: The
             state to enter **only when there is no existing journey
-            row** (Cases A, C, and the defensive sub-paths of B/D).
+            row** (Cases A/C and defensive registered resume).
             When `is_resume` is True the orchestrator must keep the
             current journey row's state and only update
             `last_processed_event_id`.
@@ -106,7 +101,7 @@ def route_user_event(
     journey: JourneyState | None,
     onboarding: WhatsappOnboardingStatus | None,
 ) -> RoutingDecision:
-    """Classify an inbound event into one of the four routing cases.
+    """Classify an inbound event into the active journey branch.
 
     Status / click events return `RoutingCase.NON_USER_EVENT` and the
     caller must route them to the outbound-status updater rather than
@@ -114,6 +109,16 @@ def route_user_event(
     """
     if event.event_kind not in USER_EVENT_KINDS:
         return _NON_USER_DECISION
+
+    # If registration is already active, keep it active. This covers a
+    # brand-new user who has a shell doctor row but has not submitted the
+    # WhatsApp Flow form yet.
+    if journey is not None and journey.journey == JourneyType.REGISTRATION:
+        return RoutingDecision(
+            case=RoutingCase.RESUME_REGISTRATION,
+            journey=JourneyType.REGISTRATION,
+            is_resume=True,
+        )
 
     # Case A - phone unknown. The registration handler will create the
     # `doctor` shell row inside its first transition.
@@ -126,28 +131,7 @@ def route_user_event(
             is_resume=False,
         )
 
-    # Case D - partial registration.
-    if not doctor.is_profile_complete:
-        if journey is not None and journey.journey == JourneyType.REGISTRATION:
-            decision_d = RoutingDecision(
-                case=RoutingCase.D_RESUME_REGISTRATION,
-                journey=JourneyType.REGISTRATION,
-                is_resume=True,
-            )
-        else:
-            # Defensive: profile incomplete but no journey row (e.g. crash
-            # mid-creation). Restart from the registration entry state so
-            # the user is never stuck.
-            decision_d = RoutingDecision(
-                case=RoutingCase.D_RESUME_REGISTRATION,
-                journey=JourneyType.REGISTRATION,
-                initial_registration_state=RegistrationState.REG_INITIATED,
-                expected_input_kind=ExpectedInputKind.REGISTRATION_TEXT,
-                is_resume=False,
-            )
-        return decision_d
-
-    # Profile is complete - either Case B or Case C.
+    # Known doctor - either trigger consent or resume registered journey.
     is_onboarded = bool(onboarding is not None and onboarding.is_onboarded)
 
     if not is_onboarded:

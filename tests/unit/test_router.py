@@ -1,4 +1,4 @@
-"""Tests for `wabot.domain.router` (Cases A-D).
+"""Tests for `wabot.domain.router`.
 
 The router is a pure function over already-loaded snapshots, so the
 fixtures here use lightweight stand-in objects (`SimpleNamespace`)
@@ -35,11 +35,10 @@ def _user_event(kind: EventKind = EventKind.USER_TEXT) -> CanonicalInboundEvent:
     )
 
 
-def _doctor(*, profile_complete: bool = True) -> Any:
+def _doctor() -> Any:
     return SimpleNamespace(
         id=uuid.UUID("22222222-2222-4222-8222-222222222222"),
         full_phone_number="9170000000",
-        is_profile_complete=profile_complete,
     )
 
 
@@ -65,8 +64,8 @@ def test_case_a_unknown_user() -> None:
     assert decision.is_resume is False
 
 
-def test_case_d_partial_profile_resume() -> None:
-    doctor = _doctor(profile_complete=False)
+def test_active_registration_journey_resumes() -> None:
+    doctor = _doctor()
     journey = _journey(JourneyType.REGISTRATION)
     decision = route_user_event(
         event=_user_event(),
@@ -74,26 +73,27 @@ def test_case_d_partial_profile_resume() -> None:
         journey=journey,
         onboarding=None,
     )
-    assert decision.case is RoutingCase.D_RESUME_REGISTRATION
+    assert decision.case is RoutingCase.RESUME_REGISTRATION
     assert decision.journey is JourneyType.REGISTRATION
     assert decision.is_resume is True
 
 
-def test_case_d_partial_profile_no_journey_row_restarts() -> None:
-    doctor = _doctor(profile_complete=False)
+def test_known_doctor_without_onboarding_triggers_consent() -> None:
+    doctor = _doctor()
     decision = route_user_event(
         event=_user_event(),
         doctor=doctor,
         journey=None,
         onboarding=None,
     )
-    assert decision.case is RoutingCase.D_RESUME_REGISTRATION
+    assert decision.case is RoutingCase.C_TRIGGER_CONSENT
+    assert decision.journey is JourneyType.REGISTERED
     assert decision.is_resume is False
-    assert decision.initial_registration_state is RegistrationState.REG_INITIATED
+    assert decision.initial_registered_state is RegisteredState.CONSENT_PENDING
 
 
 def test_case_c_complete_but_not_onboarded() -> None:
-    doctor = _doctor(profile_complete=True)
+    doctor = _doctor()
     decision = route_user_event(
         event=_user_event(),
         doctor=doctor,
@@ -108,7 +108,7 @@ def test_case_c_complete_but_not_onboarded() -> None:
 
 
 def test_case_c_no_onboarding_row_treated_as_not_onboarded() -> None:
-    doctor = _doctor(profile_complete=True)
+    doctor = _doctor()
     decision = route_user_event(
         event=_user_event(),
         doctor=doctor,
@@ -119,7 +119,7 @@ def test_case_c_no_onboarding_row_treated_as_not_onboarded() -> None:
 
 
 def test_case_b_resume_registered() -> None:
-    doctor = _doctor(profile_complete=True)
+    doctor = _doctor()
     journey = _journey(JourneyType.REGISTERED)
     decision = route_user_event(
         event=_user_event(),
@@ -132,7 +132,7 @@ def test_case_b_resume_registered() -> None:
 
 
 def test_case_b_defensive_when_journey_row_missing() -> None:
-    doctor = _doctor(profile_complete=True)
+    doctor = _doctor()
     decision = route_user_event(
         event=_user_event(),
         doctor=doctor,

@@ -12,9 +12,12 @@ Create Date: 2026-05-08
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from alembic import op
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # revision identifiers, used by Alembic.
 revision: str = "0001_init"
@@ -36,8 +39,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
     CREATE TYPE wabot.registration_state AS ENUM (
-        'REG_INITIATED','AWAITING_FULL_DETAILS','PARTIAL_CONFIRM_PENDING',
-        'AWAITING_REMAINING_DETAILS','AWAITING_CORRECTED_FULL',
+        'REG_INITIATED','AWAITING_FULL_DETAILS',
         'REGISTRATION_COMPLETED','ASSISTED_SUPPORT'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -144,7 +146,6 @@ CREATE TABLE IF NOT EXISTS wabot.journey_state (
     state_registered        wabot.registered_state,
     expected_input_kind     TEXT,
     expected_outbound_id    UUID,
-    retry_count             INT NOT NULL DEFAULT 0,
     context                 JSONB NOT NULL DEFAULT '{}'::jsonb,
     last_event_received_at  TIMESTAMPTZ(6),
     last_processed_event_id TEXT,
@@ -270,29 +271,18 @@ CREATE INDEX IF NOT EXISTS idx_genai_doctor_time
 CREATE TABLE IF NOT EXISTS wabot.registration_attempt (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     doctor_id       UUID NOT NULL REFERENCES wabot.doctor(id),
-    raw_text        TEXT NOT NULL,
+    raw_payload     JSONB NOT NULL,
     parsed          JSONB,
     is_valid        BOOLEAN NOT NULL,
     errors          JSONB,
-    attempt_no      INT NOT NULL,
     created_at      TIMESTAMPTZ(6) NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX IF NOT EXISTS idx_reg_attempt_doctor
     ON wabot.registration_attempt(doctor_id, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS wabot.partial_profile_confirmation (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    doctor_id       UUID NOT NULL REFERENCES wabot.doctor(id),
-    presented_data  JSONB NOT NULL,
-    confirmed       BOOLEAN,
-    responded_at    TIMESTAMPTZ(6),
-    created_at      TIMESTAMPTZ(6) NOT NULL DEFAULT clock_timestamp()
-);
 """
 
 
 _DOWNGRADE_DDL = """
-DROP TABLE IF EXISTS wabot.partial_profile_confirmation CASCADE;
 DROP TABLE IF EXISTS wabot.registration_attempt CASCADE;
 DROP TABLE IF EXISTS wabot.genai_interaction CASCADE;
 DROP TABLE IF EXISTS wabot.webhook_event_raw CASCADE;

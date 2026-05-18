@@ -25,6 +25,16 @@ async def test_healthz_ok() -> None:
 
 
 @pytest.mark.asyncio
+async def test_metrics_endpoint_exposes_text() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.get("/metrics")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+
+
+@pytest.mark.asyncio
 async def test_readyz_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_ping() -> bool:
         return True

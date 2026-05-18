@@ -31,10 +31,10 @@ class InteractiveButton(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(min_length=1, max_length=256)
-    """Stable per-prompt button id (echoed back as `reply.id`)."""
+    """Stable per-prompt button id echoed back as `reply.id`."""
 
     title: str = Field(min_length=1, max_length=20)
-    """User-visible button label (WhatsApp limit: 20 chars)."""
+    """User-visible button label. WhatsApp limit: 20 chars."""
 
 
 class OutboundIntent(BaseModel):
@@ -55,18 +55,16 @@ class OutboundIntent(BaseModel):
     """E.164 without the leading `+`. Mapped to `fullPhoneNumber`."""
 
     symbol: str = Field(min_length=1, max_length=128)
-    """Catalog symbol (e.g. `MSG_REG_FULL_DETAILS_PROMPT`).
+    """Catalog symbol, for example `MSG_REG_COMPLETED`.
 
     Participates in the `idempotency_key` so two intents emitted by
     the same handler invocation for the same correlation produce
     distinct rows, while a retry with the same parameters reuses one.
     """
 
-    # --- TEXT / BUTTONS --------------------------------------------------
     text: str | None = None
     buttons: tuple[InteractiveButton, ...] | None = None
 
-    # --- TEMPLATE --------------------------------------------------------
     template_name: str | None = None
     template_locale: str | None = "en"
     body_values: tuple[str, ...] | None = None
@@ -74,7 +72,4 @@ class OutboundIntent(BaseModel):
     button_values: dict[str, tuple[str, ...]] | None = None
     file_name: str | None = None
     is_flow_template: bool = False
-    """When True, Interakt is told to render this template as a
-    WhatsApp Flow (form) launcher. The flow definition itself lives
-    inside the template configuration in Interakt — we only flip the
-    flag on the wire."""
+    """When True, Interakt renders this template as a WhatsApp Flow launcher."""

@@ -46,7 +46,6 @@ class JourneyResult:
     next_registered_state: RegisteredState | None = None
     expected_input_kind: ExpectedInputKind | None = None
     expected_outbound_id: uuid.UUID | None = None
-    retry_count: int = 0
     context_patch: Mapping[str, Any] = field(default_factory=dict)
     outbound_intents: tuple[OutboundIntent, ...] = ()
 
@@ -120,7 +119,6 @@ class NoopJourneyHandler:
                 next_registered_state=journey.state_registered,
                 expected_input_kind=_coerce_expected(journey.expected_input_kind),
                 expected_outbound_id=journey.expected_outbound_id,
-                retry_count=journey.retry_count,
                 context_patch=dict(journey.context or {}),
             )
         if decision.journey is None:

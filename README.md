@@ -7,7 +7,7 @@ Built on FastAPI + asyncpg + Redis, integrates with **Interakt** (WhatsApp BSP) 
 This README covers Phase 0 (repo bootstrap). For full architecture, sequencing,
 and contracts see [implementation_plan.md](./implementation_plan.md). For the
 canonical schema see [models.txt](./models.txt). For day-to-day progress see
-[claude_memory.md](./claude_memory.md).
+[memory.md](./memory.md).
 
 ## Prerequisites
 - Python **3.12.x**
@@ -44,9 +44,10 @@ uvicorn wabot.main:app --reload --port 8000
 ```powershell
 docker compose build
 docker compose up
-# api      → http://127.0.0.1:8000/healthz
-# worker   → idles cleanly until Phase 5
-# redis    → localhost:6379
+# api           → http://127.0.0.1:8000/healthz and /metrics
+# worker        → consumes inbound webhook events
+# status-worker → consumes Interakt sent/delivered/read/failed/clicked events
+# redis         → localhost:6379
 ```
 
 For fully offline work (rare — Postgres lives on Azure):
@@ -76,9 +77,12 @@ See [implementation_plan.md §5](./implementation_plan.md). High-level:
 - Azure App Service or AKS, two roles from one image:
   - api: `CMD ["/app/docker/entrypoints/api.sh"]`
   - worker: `CMD ["/app/docker/entrypoints/worker.sh"]`
+  - status-worker: `CMD ["/app/docker/entrypoints/status_worker.sh"]`
 - Azure PostgreSQL Flex (already provisioned)
 - Azure Cache for Redis
-- Azure Service Bus (queue) — selected via `BROKER_BACKEND=azure_servicebus`
+- Azure Service Bus queues — selected via `BROKER_BACKEND=azure_servicebus`; sessions use `full_phone_number` for per-user ordering.
+- Public Interakt webhook URL after App Service deployment:
+  `https://<app-name>.azurewebsites.net/webhooks/<INTERAKT_WEBHOOK_PATH_SECRET>/interakt`
 
 ## Phase status
-See [claude_memory.md](./claude_memory.md) for the live status board.
+See [memory.md](./memory.md) for the live status board.

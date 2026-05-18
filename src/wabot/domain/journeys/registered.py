@@ -203,7 +203,6 @@ class RegisteredJourneyHandler:
             next_journey=JourneyType.REGISTERED,
             next_registered_state=RegisteredState.CONSENT_PENDING,
             expected_input_kind=ExpectedInputKind.BUTTON,
-            retry_count=0,
             outbound_intents=(intent,),
         )
 
@@ -355,7 +354,6 @@ class RegisteredJourneyHandler:
                 next_journey=JourneyType.REGISTERED,
                 next_registered_state=RegisteredState.AWAITING_ANSWER_BUTTON,
                 expected_input_kind=ExpectedInputKind.BUTTON,
-                retry_count=0,
                 outbound_intents=intents,
             )
 
@@ -369,7 +367,6 @@ class RegisteredJourneyHandler:
             next_journey=JourneyType.REGISTERED,
             next_registered_state=RegisteredState.AWAITING_FREE_TEXT,
             expected_input_kind=ExpectedInputKind.FREE_TEXT,
-            retry_count=0,
             outbound_intents=(answer_intent,),
         )
 
@@ -421,7 +418,6 @@ class RegisteredJourneyHandler:
             next_journey=JourneyType.REGISTERED,
             next_registered_state=RegisteredState.HOTLINE_TEMPLATE_SENT,
             expected_input_kind=ExpectedInputKind.FREE_TEXT,
-            retry_count=0,
             outbound_intents=(intent,),
         )
 
@@ -471,7 +467,6 @@ def _result_consent_accepted(*, full_phone_number: str, doctor: Doctor) -> Journ
         next_journey=JourneyType.REGISTERED,
         next_registered_state=RegisteredState.CONSENT_ACCEPTED,
         expected_input_kind=ExpectedInputKind.BUTTON,
-        retry_count=0,
         outbound_intents=(ack, icebreaker),
     )
 
@@ -488,7 +483,6 @@ def _result_text(
         next_journey=JourneyType.REGISTERED,
         next_registered_state=next_state,
         expected_input_kind=expected,
-        retry_count=0,
         outbound_intents=(intent,),
     )
 
@@ -509,7 +503,6 @@ def _result_text_simple(
         next_journey=JourneyType.REGISTERED,
         next_registered_state=next_state,
         expected_input_kind=expected,
-        retry_count=0,
         outbound_intents=(intent,),
     )
 

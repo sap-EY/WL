@@ -143,7 +143,12 @@ async def test_webhook_persists_and_enqueues_known_event(
     repo_factory = _FakeRepoFactory(is_new=True)
     repo_factory.install(monkeypatch)
     fake_broker = _FakeBroker()
-    monkeypatch.setattr(webhooks_router, "get_broker", lambda settings: fake_broker)
+    broker_calls: list[str] = []
+    monkeypatch.setattr(
+        webhooks_router,
+        "get_broker",
+        lambda settings, *, queue="inbound": broker_calls.append(queue) or fake_broker,
+    )
 
     app = _build_app()
     transport = ASGITransport(app=app)
@@ -161,6 +166,7 @@ async def test_webhook_persists_and_enqueues_known_event(
     assert repo_factory.recorded[0]["event_type"] == EVENT_TYPE_RECEIVED
     assert repo_factory.recorded[0]["full_phone_number"] == "917003705584"
     assert len(fake_broker.calls) == 1
+    assert broker_calls == ["inbound"]
     partition, payload = fake_broker.calls[0]
     assert partition == "917003705584"
     assert payload["type"] == EVENT_TYPE_RECEIVED
@@ -172,7 +178,11 @@ async def test_webhook_short_circuits_on_redis_dedupe(
 ) -> None:
     _install_dedupe(monkeypatch, claim_returns=False)
     fake_broker = _FakeBroker()
-    monkeypatch.setattr(webhooks_router, "get_broker", lambda settings: fake_broker)
+    monkeypatch.setattr(
+        webhooks_router,
+        "get_broker",
+        lambda settings, *, queue="inbound": fake_broker,
+    )
 
     repo_factory = _FakeRepoFactory(is_new=True)
     repo_factory.install(monkeypatch)
@@ -200,7 +210,11 @@ async def test_webhook_returns_duplicate_when_db_already_has_row(
     repo_factory = _FakeRepoFactory(is_new=False)
     repo_factory.install(monkeypatch)
     fake_broker = _FakeBroker()
-    monkeypatch.setattr(webhooks_router, "get_broker", lambda settings: fake_broker)
+    monkeypatch.setattr(
+        webhooks_router,
+        "get_broker",
+        lambda settings, *, queue="inbound": fake_broker,
+    )
 
     app = _build_app()
     transport = ASGITransport(app=app)
@@ -221,7 +235,12 @@ async def test_webhook_handles_click_event(monkeypatch: pytest.MonkeyPatch, secr
     repo_factory = _FakeRepoFactory(is_new=True)
     repo_factory.install(monkeypatch)
     fake_broker = _FakeBroker()
-    monkeypatch.setattr(webhooks_router, "get_broker", lambda settings: fake_broker)
+    broker_calls: list[str] = []
+    monkeypatch.setattr(
+        webhooks_router,
+        "get_broker",
+        lambda settings, *, queue="inbound": broker_calls.append(queue) or fake_broker,
+    )
 
     payload = _sample_received_payload()
     payload["type"] = EVENT_TYPE_API_CLICKED
@@ -239,6 +258,7 @@ async def test_webhook_handles_click_event(monkeypatch: pytest.MonkeyPatch, secr
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert len(fake_broker.calls) == 1
+    assert broker_calls == ["status"]
 
 
 @pytest.fixture(autouse=True)

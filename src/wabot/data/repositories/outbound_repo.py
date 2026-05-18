@@ -34,6 +34,9 @@ class OutboundRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_by_id(self, outbound_id: uuid.UUID) -> OutboundMessage | None:
+        return await self._session.get(OutboundMessage, outbound_id)
+
     async def create_pending(
         self,
         *,
@@ -100,15 +103,53 @@ class OutboundRepository:
         row = await self.get_by_interakt_id(interakt_message_id)
         if row is None:
             return None
-        row.status = status
-        if status is OutboundStatus.DELIVERED:
-            row.delivered_at = at
-        elif status is OutboundStatus.READ:
-            row.read_at = at
-        elif status is OutboundStatus.FAILED:
-            row.failed_at = at
-            row.failure_reason = failure_reason
-        elif status is OutboundStatus.CLICKED:
-            row.clicked_at = at
-            row.clicked_button_text = clicked_button_text
+        self.apply_status(
+            row,
+            status=status,
+            at=at,
+            failure_reason=failure_reason,
+            clicked_button_text=clicked_button_text,
+        )
         return row
+
+    def apply_status(
+        self,
+        row: OutboundMessage,
+        *,
+        status: OutboundStatus,
+        at: datetime,
+        failure_reason: str | None = None,
+        clicked_button_text: str | None = None,
+    ) -> None:
+        """Apply a provider status without regressing the lifecycle.
+
+        Interakt may deliver status webhooks out of order. Timestamp
+        columns are filled idempotently, while the aggregate `status`
+        only moves forward according to `_STATUS_RANK`.
+        """
+        current_rank = _STATUS_RANK[row.status]
+        next_rank = _STATUS_RANK[status]
+        if next_rank >= current_rank:
+            row.status = status
+        if status is OutboundStatus.SENT:
+            row.sent_at = row.sent_at or at
+        elif status is OutboundStatus.DELIVERED:
+            row.delivered_at = row.delivered_at or at
+        elif status is OutboundStatus.READ:
+            row.read_at = row.read_at or at
+        elif status is OutboundStatus.FAILED:
+            row.failed_at = row.failed_at or at
+            row.failure_reason = failure_reason or row.failure_reason
+        elif status is OutboundStatus.CLICKED:
+            row.clicked_at = row.clicked_at or at
+            row.clicked_button_text = clicked_button_text or row.clicked_button_text
+
+
+_STATUS_RANK: dict[OutboundStatus, int] = {
+    OutboundStatus.PENDING_SEND: 0,
+    OutboundStatus.SENT: 1,
+    OutboundStatus.DELIVERED: 2,
+    OutboundStatus.READ: 3,
+    OutboundStatus.CLICKED: 4,
+    OutboundStatus.FAILED: 5,
+}

@@ -20,6 +20,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 AppEnv = Literal["local", "dev", "staging", "prod"]
 SslMode = Literal["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
 BrokerBackend = Literal["redis_streams", "azure_servicebus"]
+BrokerQueue = Literal["inbound", "status", "genai", "outbound"]
 
 
 class _Base(BaseSettings):
@@ -109,11 +110,31 @@ class AppSettings(_Base):
     broker_backend: BrokerBackend = Field(default="redis_streams", alias="BROKER_BACKEND")
     broker_inbound_stream: str = Field(default="wabot.inbound", alias="BROKER_INBOUND_STREAM")
     broker_inbound_group: str = Field(default="wabot.inbound.workers", alias="BROKER_INBOUND_GROUP")
+    broker_status_stream: str = Field(default="wabot.status", alias="BROKER_STATUS_STREAM")
+    broker_status_group: str = Field(default="wabot.status.workers", alias="BROKER_STATUS_GROUP")
+    broker_genai_stream: str = Field(default="wabot.genai", alias="BROKER_GENAI_STREAM")
+    broker_genai_group: str = Field(default="wabot.genai.workers", alias="BROKER_GENAI_GROUP")
+    broker_outbound_stream: str = Field(default="wabot.outbound", alias="BROKER_OUTBOUND_STREAM")
+    broker_outbound_group: str = Field(
+        default="wabot.outbound.workers", alias="BROKER_OUTBOUND_GROUP"
+    )
     broker_dlq_stream: str = Field(default="wabot.inbound.dlq", alias="BROKER_DLQ_STREAM")
     servicebus_connection_string: SecretStr = Field(
         default=SecretStr(""), alias="SERVICEBUS_CONNECTION_STRING"
     )
     servicebus_queue_inbound: str = Field(default="wabot-inbound", alias="SERVICEBUS_QUEUE_INBOUND")
+    servicebus_queue_status: str = Field(default="wabot-status", alias="SERVICEBUS_QUEUE_STATUS")
+    servicebus_queue_genai: str = Field(default="wabot-genai", alias="SERVICEBUS_QUEUE_GENAI")
+    servicebus_queue_outbound: str = Field(
+        default="wabot-outbound", alias="SERVICEBUS_QUEUE_OUTBOUND"
+    )
+
+    # --- Observability ------------------------------------------------------
+    metrics_enabled: bool = Field(default=True, alias="METRICS_ENABLED")
+    otel_enabled: bool = Field(default=False, alias="OTEL_ENABLED")
+    azure_monitor_connection_string: SecretStr = Field(
+        default=SecretStr(""), alias="APPLICATIONINSIGHTS_CONNECTION_STRING"
+    )
 
     # --- Computed -----------------------------------------------------------
     @computed_field  # type: ignore[prop-decorator]
@@ -135,6 +156,33 @@ class AppSettings(_Base):
             f"postgresql+asyncpg://{self.db_user}:***@{self.db_host}:{self.db_port}"
             f"/{self.db_name}?ssl={self.db_ssl_mode}"
         )
+
+    def broker_stream_for(self, queue: BrokerQueue) -> str:
+        """Return the Redis Stream name for a logical queue."""
+        return {
+            "inbound": self.broker_inbound_stream,
+            "status": self.broker_status_stream,
+            "genai": self.broker_genai_stream,
+            "outbound": self.broker_outbound_stream,
+        }[queue]
+
+    def broker_group_for(self, queue: BrokerQueue) -> str:
+        """Return the Redis consumer group for a logical queue."""
+        return {
+            "inbound": self.broker_inbound_group,
+            "status": self.broker_status_group,
+            "genai": self.broker_genai_group,
+            "outbound": self.broker_outbound_group,
+        }[queue]
+
+    def servicebus_queue_for(self, queue: BrokerQueue) -> str:
+        """Return the Azure Service Bus queue name for a logical queue."""
+        return {
+            "inbound": self.servicebus_queue_inbound,
+            "status": self.servicebus_queue_status,
+            "genai": self.servicebus_queue_genai,
+            "outbound": self.servicebus_queue_outbound,
+        }[queue]
 
 
 @lru_cache(maxsize=1)

@@ -1,7 +1,7 @@
 """Local-only doctor state seeder for end-to-end shake-out.
 
 Quickly flips a single doctor row (and its journey/consent/onboarding
-rows) between the three meaningful entry states so you can drive the
+rows) between the meaningful entry states so you can drive the
 journey engines against a real WhatsApp number without hand-editing
 DBeaver after every test.
 
@@ -10,12 +10,7 @@ Usage examples (from repo root, `.env` loaded):
     # Wipe everything for the phone — next inbound is Case A (fresh).
     python scripts/seed_state.py 9867401411 fresh
 
-    # Doctor row with a partial profile, no journey row — next inbound
-    # hits Case D (partial-confirm Yes/No template).
-    python scripts/seed_state.py 9867401411 partial
-
-    # Doctor with profile complete + not onboarded — next inbound hits
-    # Case C (consent template send).
+    # Doctor row exists but is not onboarded — next inbound sends consent.
     python scripts/seed_state.py 9867401411 complete-not-onboarded
 
 The script is destructive within the rows it touches: it deletes the
@@ -41,7 +36,7 @@ from wabot.data.models.genai import GenAIInteraction
 from wabot.data.models.journey import JourneyState, JourneyStateHistory
 from wabot.data.models.onboarding import WhatsappOnboardingStatus
 from wabot.data.models.outbound import OutboundMessage
-from wabot.data.models.registration import PartialProfileConfirmation, RegistrationAttempt
+from wabot.data.models.registration import RegistrationAttempt
 from wabot.data.repositories import DoctorRepository
 from wabot.infra.logging import configure_logging, get_logger
 
@@ -51,7 +46,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-STATES: Final[tuple[str, ...]] = ("fresh", "partial", "complete-not-onboarded")
+STATES: Final[tuple[str, ...]] = ("fresh", "complete-not-onboarded")
 
 
 async def _clear_journey_and_consent(session, doctor_id: uuid.UUID) -> None:
@@ -72,9 +67,6 @@ async def _clear_journey_and_consent(session, doctor_id: uuid.UUID) -> None:
         delete(RegistrationAttempt).where(RegistrationAttempt.doctor_id == doctor_id)
     )
     await session.execute(
-        delete(PartialProfileConfirmation).where(PartialProfileConfirmation.doctor_id == doctor_id)
-    )
-    await session.execute(
         delete(ConversationMessage).where(ConversationMessage.doctor_id == doctor_id)
     )
     await session.execute(
@@ -90,28 +82,6 @@ async def _seed_fresh(session, phone: str) -> uuid.UUID | None:
     await _clear_journey_and_consent(session, doctor.id)
     await session.execute(delete(Doctor).where(Doctor.id == doctor.id))
     return None
-
-
-async def _seed_partial(session, phone: str) -> uuid.UUID:
-    repo = DoctorRepository(session)
-    doctor = await repo.upsert_profile(
-        full_phone_number=phone,
-        first_name="Test",
-        last_name=None,
-        speciality="Cardiology",
-        email=None,
-        address=None,
-        city=None,
-        state=None,
-        pincode=None,
-        is_profile_complete=False,
-    )
-    await _clear_journey_and_consent(session, doctor.id)
-    # Stamp registration_completed_at None — repo only sets it on full
-    # completion, so this is already correct after upsert.
-    doctor.registration_completed_at = None
-    await session.flush()
-    return doctor.id
 
 
 async def _seed_complete_not_onboarded(session, phone: str) -> uuid.UUID:
@@ -138,13 +108,6 @@ async def _run(phone: str, state: str) -> int:
             if state == "fresh":
                 await _seed_fresh(session, phone)
                 logger.info("wabot.seed_state.fresh", phone=phone)
-            elif state == "partial":
-                doctor_id = await _seed_partial(session, phone)
-                logger.info(
-                    "wabot.seed_state.partial",
-                    phone=phone,
-                    doctor_id=str(doctor_id),
-                )
             elif state == "complete-not-onboarded":
                 doctor_id = await _seed_complete_not_onboarded(session, phone)
                 logger.info(

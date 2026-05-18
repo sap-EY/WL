@@ -121,7 +121,6 @@ class RegistrationJourneyHandler:
                 next_journey=JourneyType.REGISTRATION,
                 next_registration_state=current_state,
                 expected_input_kind=ExpectedInputKind.REGISTRATION_TEXT,
-                retry_count=journey.retry_count,
             )
 
         # Any other state \u2014 user typed text instead of submitting the
@@ -226,7 +225,6 @@ def _send_form_template(*, full_phone_number: str) -> JourneyResult:
         next_journey=JourneyType.REGISTRATION,
         next_registration_state=RegistrationState.AWAITING_FULL_DETAILS,
         expected_input_kind=ExpectedInputKind.REGISTRATION_TEXT,
-        retry_count=0,
         outbound_intents=(intent,),
     )
 
@@ -252,7 +250,6 @@ def _result_completed(*, full_phone_number: str, first_name: str | None = None) 
         next_journey=JourneyType.REGISTERED,
         next_registered_state=RegisteredState.CONSENT_PENDING,
         expected_input_kind=ExpectedInputKind.BUTTON,
-        retry_count=0,
         outbound_intents=(completion_intent, consent_intent),
     )
 
@@ -266,7 +263,6 @@ def _result_assisted_support(*, full_phone_number: str) -> JourneyResult:
         next_journey=JourneyType.REGISTRATION,
         next_registration_state=RegistrationState.ASSISTED_SUPPORT,
         expected_input_kind=ExpectedInputKind.FREE_TEXT,
-        retry_count=0,
         outbound_intents=(intent,),
     )
 

@@ -9,11 +9,15 @@ logged and reported via the boolean return.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING, cast
 
 from redis.asyncio import Redis
 
 from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.logging import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
 
 logger = get_logger(__name__)
 
@@ -50,7 +54,7 @@ async def redis_ping(timeout_seconds: float = 1.0) -> bool:
     client = get_redis()
     try:
         async with asyncio.timeout(timeout_seconds):
-            await client.ping()
+            await cast("Awaitable[bool]", client.ping())
         return True
     except Exception as exc:
         logger.warning("wabot.redis.ping_failed", error=str(exc))

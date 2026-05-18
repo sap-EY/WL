@@ -13,7 +13,10 @@ Concrete implementations live alongside this module
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
+
+BrokerQueue = Literal["inbound", "status", "genai", "outbound"]
+"""Logical queue names used by both Redis Streams and Azure Service Bus."""
 
 
 class BrokerEnqueueError(RuntimeError):
@@ -81,6 +84,9 @@ class InboundBroker(Protocol):
 
     async def ack(self, *, message_id: str) -> None:
         """Acknowledge `message_id`; the broker may purge it from the queue."""
+
+    async def nack(self, *, message_id: str) -> None:
+        """Release `message_id` for retry without marking it processed."""
 
     async def close(self) -> None:
         """Release resources held by the broker (idempotent)."""

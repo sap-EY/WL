@@ -20,21 +20,21 @@ This document captures the latest agreed understanding of the WhatsApp bot journ
 - **Interakt** will be used as the WhatsApp Business Partner / messaging platform.
 - The solution currently supports two business journeys:
   - **Registered Users** (already registered doctors whose data is present in master user table)
-  - **User Registration** (new/unregistered doctors and partially registered doctors)
+  - **User Registration** (new/unregistered doctors)
 - For **registered users**, the chat experience is intended to be **free-flow conversational**, similar to AI chat interfaces.
 - **All user free-text messages** in the registered-user journey must be sent to the **GenAI layer**.
 - The **GenAI layer** will interpret all free-text user inputs and return a structured API response containing the necessary intent / action flags so that the orchestration layer can choose the correct **Interakt API**, **template**, or **session message**.
 - All answers delivered over WhatsApp will be **text-only**.
 - If the answer requires supporting content such as image, video, document, audio, or any other attachment, the WhatsApp bot will **not** send that attachment directly. Instead, the answer text will include an **app/deep link** provide by **GenAI layer** in the same api response to the query.
 - Clicking that link should open the mobile app being developed in parallel. If the app is not installed, the link should redirect the user to the respective app store / play store. The points regarding the genai layer and mobile application are not in our scope of development but it's better for your context.
-- Consent decline creates a **soft halt only**. Backend should retain the user record with consent status as **declined** or any alternative flag decided during development, and future re-entry is allowed through a new inbound message or a future follow-up pipeline if any.
+- Consent decline creates a **soft halt only**. Backend should retain the user record with consent status as **declined** or any alternative flag decided during development, and future re-entry is allowed through a new inbound message.
 - The WhatsApp/orchestration layer remains responsible for:
   - webhook processing
   - state/session tracking
   - template/session message dispatch through Interakt
   - fallback messaging
   - registration parsing/validation flow handling for onboarding
-  - master-data lookup and first-message routing
+  - doctor lookup and first-message routing
   - other whatsapp workflow realted stuff mentioned in detail going forward in this document
 
 ---
@@ -86,10 +86,9 @@ This document captures the latest agreed understanding of the WhatsApp bot journ
   - optional app/deep-link in scientific text answer when additional material must be consumed outside WhatsApp
 
 #### Registration Backend
-- create internal user record for new users in the master user table.
-- parse registration details
-- perform field validations
-- fetch available partial data from client master
+- create internal user record for new users in the master user table
+- send the WhatsApp Flow registration template for new doctors
+- parse submitted WhatsApp Flow form responses
 - update doctor registration record
 - mark registration success / failure / escalation state
 
@@ -104,9 +103,9 @@ This document captures the latest agreed understanding of the WhatsApp bot journ
 - **GenAI must return structured metadata/flags in their API josn response**, not only raw natural-language text.
 - **All WhatsApp answer delivery is text-only**. No WhatsApp media/doc/audio/image/video attachment will be sent by the bot.
 - **If supporting content is needed, GenAI should include an app/deep-link in the answer text.**
-- **Registration flow is state-driven and deterministic** once the backend identifies whether the user is new, partial, or already fully registered.
-- **For any first inbound free-text message, the first resolution step is phone-number lookup in the client/master data table.**
-- **Consent decline is reversible via future re-entry**; the system may resend the consent template on future user interaction or future campaign follow-up.
+- **Registration flow is state-driven and deterministic** once the backend identifies whether the user is new or already registered.
+- **For any first inbound free-text message, the first resolution step is phone-number lookup in the doctor table.**
+- **Consent decline is reversible via future re-entry**; the system may resend the consent template on future user interaction.
 
 ---
 
@@ -119,50 +118,30 @@ This resolver must run when Interakt webhook receives any free-text user message
 - `REGISTER_WL` from QR code / click-to-chat entry
 - any other user free text message
 
-### Step 1 — Lookup phone-number in master data
-On receiving the inbound free-text message, the orchestration layer must first check whether the user phone-number exists in the client/master data table.
+### Step 1 — Lookup phone-number in doctor table
+On receiving the inbound free-text message, the orchestration layer must first check whether the user phone-number exists in the application `doctor` table.
 
 ### Resolution cases
 
-#### Case A — Phone-number not found in user master data table
-- create a new user record in table
+#### Case A — Phone-number not found in doctor table
+- create a new shell user record in the doctor table
 - initiate **user_registration** journey
-- send full registration data collection message
-- apply 2 retry limit for registration data format/parsing incase of invalid user input
-- on successful update, mark registration completed
-- then initiate **registered_users** journey by sending the consent template
+- send the `user_registration_v1` WhatsApp Flow template
+- user submits registration details inside the WhatsApp Flow form
+- on successful form parse/update, mark registration completed
+- immediately emit the registration-completed acknowledgement followed by the registered-users consent template
 
-#### Case B — Phone-number found and user is fully registered
+#### Case B — Phone-number found in doctor table
 - check whether the user has already been onboarded into the WhatsApp registered-user journey
 - if **not onboarded**, send the **consent + welcome/start chat flow** immediately
 - if **already onboarded**, route directly into the registered-user chat handling flow
-
-#### Case C — Phone-number found but user record is partial/incomplete and available data is present
-- fetch available partial data from user master data table
-- send confirmation text message with **Yes / No** buttons asking whether the available data is correct
-- if user selects **Yes**:
-  - ask user to send only the **remaining/pending data**
-  - apply 2 retry limit for format/parsing
-  - update record with remaining data
-  - mark registration completed
-  - initiate **registered_users** journey by sending the consent template
-- if user selects **No**:
-  - ask user to send **all correct details**
-  - apply 2 retry limit for format/parsing
-  - update record with corrected full data
-  - mark registration completed
-  - initiate **registered_users** journey by sending the consent template
-
-#### Case D — User sends direct free text before receiving batch-driven welcome/consent template
-- this is treated as a sub-case of **Case B**
-- if the phone-number is already fully registered but the welcome batch has not yet effectively started the WhatsApp journey, the system should send the **consent + welcome/start chat** entry flow immediately
 
 ---
 
 ## 5) Journey 1 — Registered Users
 
 ### 5.1 Purpose
-This journey is for **already registered doctors** whose details already or now after registration exist in the master data table. The objective is to enable:
+This journey is for **already registered doctors** whose details already or now after registration exist in the doctor table. The objective is to enable:
 - consent capture
 - AI-assisted free-flow question answering using GenAI/RAG layer built on client knowledge base
 - hotline support access
@@ -172,8 +151,7 @@ This journey is intentionally **free-flow chat first**, while still using templa
 
 ### 5.2 Entry Triggers
 The registered-users journey can begin via:
-- scheduled batch job sending consent + welcome template to registered doctors via a separate pipeline
-- direct first-message routing for a fully registered user who messages first before the batch flow reaches the user
+- direct first-message routing for a known registered user
 - post-registration completion transition from the `user_registration` journey
 
 ### 5.3 Step 0 — Welcome + Consent Template Message
@@ -208,7 +186,6 @@ If you wish to connect with us later, please reach out to us on {{support}}.
 - backend should keep consent status as `DECLINED`
 - future re-entry is allowed
 - future inbound user message can trigger consent template message again
-- future business follow-up pipeline may also re-attempt consent using template messaging
 
 ### 5.5 If user selects “Let's continue”
 **Message type:** Session text message
@@ -343,7 +320,7 @@ The doctor may continue asking follow-up questions in the same chat.
 **Message type:** session text message api
 
 #### Fallback 1 — Invalid input when bot expects a button response
-Applicable when the doctor is expected to select from explicit buttons (for example, consent step, partial-data confirmation step, or scientific-answer post-response buttons).
+Applicable when the doctor is expected to select from explicit buttons (for example, consent step or scientific-answer post-response buttons).
 
 **Draft text:**
 ```text
@@ -382,8 +359,7 @@ hash-delimited details.
 
 ### 6.2 Entry Trigger
 The **user_registration** journey starts on the **first inbound
-message** from any phone whose `doctor` row is missing or has
-`is_profile_complete = false`. Entry can be:
+message** from any phone whose `doctor` row is missing. Entry can be:
 - offline-QR / click-to-chat with any pre-filled text (e.g. `REGISTER_WL`)
 - any free-text first message
 - any button reply that the router maps to Case A or Case D
@@ -399,11 +375,10 @@ message** from any phone whose `doctor` row is missing or has
 3. Backend upserts the doctor row with the submitted values, sets
    `is_profile_complete = true`, transitions to
    `REGISTRATION_COMPLETED`, and emits the success acknowledgement.
-4. The next router pass picks the registered-user consent template
-   (Journey 1 entry).
+4. The backend immediately emits the registration-completed acknowledgement
+  followed by the registered-user consent template in the same transition.
 
-There is **no partial-data confirmation step and no retry counter** —
-the Flow form is validated client-side by WhatsApp itself, so any
+The Flow form is validated client-side by WhatsApp itself, so any
 parser failure on our end is treated as a malformed payload and the
 journey escalates to `ASSISTED_SUPPORT`.
 
@@ -451,7 +426,7 @@ Thank you {{Doctor Name}}.
 Your registration has been completed successfully.
 ```
 **Next step:** doctor becomes eligible for the registered-users
-journey; the consent template is sent on the next router pass.
+journey; the consent template is sent immediately after this acknowledgement.
 
 ### 6.8 Assisted Support Fallback
 If the form response cannot be parsed (empty payload, missing required
@@ -484,95 +459,42 @@ Any free-text input on webhook
   +--> Input may be any other free text
   |
   v
-Lookup phone-number in master data
+Lookup phone-number in doctor table
   |
-  +--> [Phone-number not in master data]
+  +--> [Phone-number not in doctor table]
   |         |
   |         v
   |   Create new DB record and send user registration message
   |         |
   |         v
-  |   User sends data in correct format
-  |         |
-  |         +--> max 2 retry limit
+  |   User submits WhatsApp Flow form
   |         |
   |         v
-  |   Update user details in DB
+  |   Parse form and update user details in DB
   |         |
   |         v
   |   Registration completed
   |         |
   |         v
-  |   Initiate registered-users journey by sending consent template
+  |   Send registration-completed acknowledgement + consent template
   |
   +--> [Phone-number found]
             |
             v
-    Is user completely registered?
-            |
-            +--> [No]
-            |         |
-            |         v
-            |   Fetch available user data and put it in text message for confirmation
-            |         |
-            |         v
-            |   User selects Yes / No
-            |         |
-            |         +--> [Yes]
-            |         |         |
-            |         |         v
-            |         |   Ask user to send remaining data
-            |         |         |
-            |         |         v
-            |         |   User sends data in correct format
-            |         |         |
-            |         |         +--> max 2 retry limit
-            |         |         |
-            |         |         v
-            |         |   Update user record with remaining data
-            |         |         |
-            |         |         v
-            |         |   Registration completed
-            |         |         |
-            |         |         v
-            |         |   Initiate registered-users journey by sending consent template
-            |         |
-            |         +--> [No]
-            |                   |
-            |                   v
-            |             Ask user to send correct/full details
-            |                   |
-            |                   v
-            |             User sends data in correct format
-            |                   |
-            |                   +--> max 2 retry limit
-            |                   |
-            |                   v
-            |             Update user record with corrected data
-            |                   |
-            |                   v
-            |             Registration completed
-            |                   |
-            |                   v
-            |             Initiate registered-users journey by sending consent template
-            |
-            +--> [Yes]
-                      |
-                      v
-                Is user already onboarded in WhatsApp journey?
-                      |
-                      +--> [No]
-                      |         |
-                      |         v
-                      |   Set first-message-sent / onboard flag true
-                      |         |
-                      |         v
-                      |   Send consent + welcome message to user
-                      |
-                      +--> [Yes]
-                                |
-                                v
-                          Send user’s free-text message to GenAI layer
+        Is user already onboarded in WhatsApp journey?
+        |
+        +--> [No]
+        |         |
+        |         v
+        |   Set first-message-sent / onboard flag true
+        |         |
+        |         v
+        |   Send consent + welcome message to user
+        |
+        +--> [Yes]
+              |
+              v
+            Send user's free-text message to GenAI layer
                                           |
                                           v
                           GenAI decision agent: is query scientific / requires RAG?
@@ -603,9 +525,6 @@ Lookup phone-number in master data
                      |                                                           loop back
                      +------------------------------------------------------------------->
 
-Consent/Batch convergence:
-  Scheduled batch job sending consent + welcome template also joins the same consent stage.
-
 Consent stage:
   After consent template is sent:
     If user accepts consent:
@@ -616,7 +535,7 @@ Consent stage:
       - acknowledge decline
       - set consent status = DECLINED
       - soft halt only
-      - future inbound message or future follow-up campaign can resend consent template
+      - future inbound message can resend consent template
 ```
 
 ---
@@ -632,7 +551,7 @@ User enters via any first inbound message
   v
 Lookup phone-number in doctor table
   |
-  +--> [Not found OR is_profile_complete = false]
+  +--> [Not found]
   |         |
   |         v
   |   (If not found) create new doctor shell row
@@ -670,9 +589,9 @@ Lookup phone-number in doctor table
   |             Send registration-success acknowledgement
   |                   |
   |                   v
-  |             Trigger registered-users consent template on next pass
+  |             Send registered-users consent template immediately
   |
-  +--> [Found and is_profile_complete = true]
+  +--> [Found]
             |
             v
       Route to registered-users journey (Journey 1)
@@ -717,7 +636,6 @@ At minimum, architecture/schema design may require entities similar to:
 - `template_registry`
 - `hotline_config`
 - `registration_parse_attempt`
-- `partial_profile_confirmation`
 - `master_data_lookup_log`
 - `user_registration_status`
 - `whatsapp_onboarding_status`
@@ -742,22 +660,17 @@ At minimum, architecture/schema design may require entities similar to:
 
 #### User Registration
 - `REG_INITIATED`
-- `AWAITING_REGISTRATION_DETAILS`
-- `PARTIAL_DATA_CONFIRMATION_PENDING`
-- `AWAITING_REMAINING_DETAILS`
-- `AWAITING_CORRECTED_FULL_DETAILS`
-- `DETAIL_PARSE_RETRY_1`
+- `AWAITING_FULL_DETAILS` (current implementation: awaiting WhatsApp Flow form submission)
 - `REGISTRATION_COMPLETED`
-- `REGISTRATION_FAILED`
-- `ASSISTED_SUPPORT_REQUIRED`
+- `ASSISTED_SUPPORT`
 
 ### 10.3 Suggested orchestration routing rules
 
 #### Global free-text-message router (this has to be thought carefully to get the most optimized solution with minimal db or cache lookups to get lowest possible latency)
-- if this is the user’s inbound free-text message or no active journey/session exists:
-  - lookup phone-number in master data
-  - determine whether user is new / partial / fully registered
-  - determine whether fully registered user is already onboarded in WhatsApp journey
+- if this is the user's inbound free-text message or no active journey/session exists:
+  - lookup phone-number in doctor table
+  - determine whether user is new or known
+  - determine whether known user is already onboarded in WhatsApp journey
   - route to `user_registration` or `registered_users` accordingly
 
 #### For Registered Users
@@ -774,14 +687,12 @@ At minimum, architecture/schema design may require entities similar to:
     - send hotline template/CTA
 
 #### For User Registration
-- if active state = `AWAITING_REGISTRATION_DETAILS`:
-  - route input to registration detail parser
-- if active state = `AWAITING_REMAINING_DETAILS`:
-  - parse only pending fields
-- if active state = `AWAITING_CORRECTED_FULL_DETAILS`:
-  - parse full corrected profile
-- if active state = `PARTIAL_DATA_CONFIRMATION_PENDING`:
-  - expect Yes / No button input
+- if active state = `AWAITING_FULL_DETAILS`:
+  - wait for a WhatsApp Flow form response
+  - if user sends free text instead, re-send the `user_registration_v1` template
+- if a Flow form response arrives:
+  - parse form fields and upsert doctor profile
+  - send registration-completed acknowledgement followed by consent template
 - otherwise:
   - send suitable fallback / context reset message
 
@@ -864,14 +775,13 @@ These are still worth clarifying during implementation planning:
 - What is the exact final shape of the GenAI response contract?
 - How many previous turns will be sent to GenAI?
 - What are the final hotline hours and support contact values? (to be kept configurable via .env file)
-- How will the system determine `fully registered` vs `partial/incomplete` status from master data? (we can keep a flag field in master data using which we can determine the status. The field will be prefilled for all the already existing user data which the client will provide us)
 
 ---
 
 ## 14) Quick Summary
 
 ### Registered Users
-- scheduled or first-message-triggered consent + welcome flow
+- first-message-triggered consent + welcome flow
 - consent accept/decline handling
 - decline is a soft halt with future re-entry allowed
 - all free-text goes to GenAI
@@ -883,15 +793,11 @@ These are still worth clarifying during implementation planning:
 
 ### User Registration
 - entry can happen from `REGISTER_WL` or any other free-text input
-- first step is always phone-number lookup in master data
-- new user → fu (including Flow templates with `is_flow_template = true`)
-- send text session message
-- send text session message with buttons
-- send CTA-enabled template where supported
-- parse inbound webhook payload to common internal format, including
-  the `message_api_flow_response` event and the `nfm_reply.response_json`
-  body
-- log outbound response IDs and statuses
+- first step is always phone-number lookup in the doctor table
+- new user receives the `user_registration_v1` Flow template
+- user submits First Name, Last Name, optional MCI-ID, and Speciality in the in-app form
+- backend parses the `message_api_flow_response` event and `nfm_reply.response_json` body
+- on Submit, backend upserts the profile, marks registration complete, and sends the registered-users consent template
 
 ### Rate limiting
 The orchestrator does **not** enforce a client-side request-per-second
@@ -900,8 +806,7 @@ returns HTTP `429 Too Many Requests` the client treats it as a
 transient error and retries with tenacity-driven exponential backoff.
 No Redis token bucket is used.
 ---
-happens from any first inbound message when the doctor row is
-  missing or `is_profile_complete = false`
+happens from any first inbound message when the doctor row is missing
 - bot sends `user_registration_v1` Flow template (single CTA opens an
   in-app form)
 - form collects First Name (req), Last Name (req), MCI-ID (opt),
@@ -909,5 +814,4 @@ happens from any first inbound message when the doctor row is
 - on Submit, backend upserts the profile (email / address / city /
   state / pincode stored as NULL), marks registration complete, and
   triggers the registered-users consent template
-- no partial-data confirmation step and no retry counter — malformed
-  payload escalates straight to assisted support
+- malformed payload escalates straight to assisted support

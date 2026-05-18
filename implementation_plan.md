@@ -4,7 +4,7 @@
 
 > **Document version: v2 (post architecture review).** Major changes vs v1 are summarized at the end in §22 "Revision Log". When v1 and v2 disagree, v2 wins. Companion files maintained alongside this plan:
 > - [models.txt](models.txt) — canonical, copy-paste-ready PostgreSQL DDL for all tables (DBeaver-runnable).
-> - [claude_memory.md](claude_memory.md) — living progress tracker (phase status, completed/pending tasks, decisions, open questions).
+> - [memory.md](memory.md) — living progress tracker (phase status, completed/pending tasks, decisions, open questions).
 
 ### Hard constraints baked into v2
 - **15-day delivery**: prefer the simplest design that satisfies correctness and the principles in §3. No speculative complexity.
@@ -14,7 +14,7 @@
 - **`callbackData` is the cross-message correlation primitive** for outbound→reply chaining (carries our internal outbound_message_id and correlation_id). See §7.8 and §9.
 - **Timestamps everywhere**: `TIMESTAMPTZ` with microsecond precision (6 decimals), UTC only — matches the precision Interakt uses in its payloads. Critical for race-condition forensics.
 - **Local API testing via Thunder Client** (Postman is blocked on the dev's machine). Collection lives at `scripts/thunderclient/` instead of `scripts/postman/`.
-- **We own the master user table**. There is no separate "client master" mirror or read-only view — the `doctor` table in our DB is the canonical source of profile-completeness. Client-supplied data is loaded into it once via a one-shot import script.
+- **We own the application doctor table**. There is no separate "client master" mirror or read-only view in the current bot runtime — the `doctor` table in our DB is the canonical source for routing known users.
 - **GenAI is exposed as an async HTTP API** by the GenAI team. We integrate using `await` on a non-blocking `httpx.AsyncClient` call with a hard timeout; the orchestrator worker (not the webhook hot path) is the only place that blocks on it, so frontend message latency is never affected.
 
 ---
@@ -30,7 +30,7 @@ A production-grade, asynchronous, container-deployable **WhatsApp orchestration 
 
 The system supports two business journeys:
 1. **`registered_users`** — free-flow conversational chat (consent → free-text → GenAI → text-only answer with optional buttons).
-2. **`user_registration`** — deterministic onboarding for new/partial users that converges into the registered-user journey.
+2. **`user_registration`** — deterministic onboarding for new/unregistered users that converges into the registered-user journey.
 
 ### Core goals
 - **Correctness under concurrency**: per-user serial processing, idempotent webhook handling, replay-safe state machine.
@@ -59,8 +59,8 @@ The system supports two business journeys:
 ### `context_final.md`
 - Two journeys (`registered_users`, `user_registration`); free-flow chat for registered users; all free text → GenAI; text-only outbound; deep links for media.
 - Consent decline is a **soft halt** — the user record stays, and re-entry is allowed.
-- Free-text router runs phone-number lookup against master data and branches into 4 cases (not-found, fully-registered+onboarded, fully-registered+not-onboarded, partial).
-- Registration parser allows max 2 retries before assisted-support escalation.
+- Free-text router runs phone-number lookup against the doctor table and branches into two implemented paths: new user registration or known user registered journey.
+- Registration uses a WhatsApp Flow form; malformed form payloads escalate to assisted support.
 - Templates referenced: `doctor_welcome_consent_v1`, `hotline_v1` (codenames; created in Interakt).
 - Suggested entities and journey states are listed in the context — used as a starting baseline below.
 
@@ -88,7 +88,7 @@ The system supports two business journeys:
 | A1 | Interakt webhook does not currently expose an HMAC signature; we will add an **IP allowlist + shared secret in URL path or header** as best-effort verification, and design code to accept HMAC later. | Interakt docs in workspace don't document signature. |
 | A2 | Phone numbers are normalized to E.164 without `+` (e.g., `919999999999`) — same shape Interakt uses in `channel_phone_number`. | Consistency with Interakt payloads. |
 | A3 | "Onboarded into WhatsApp journey" = `whatsapp_onboarding_status.is_onboarded = true` (set the moment we send the consent template the first time; flips to `consent_accepted` after acceptance). | Context implies a flag; not explicitly modeled. |
-| A4 *(revised v2)* | **We own the master user table**. The `doctor` table in our DB is the only source of profile completeness. Client-provided data is loaded once via a one-shot import script. There is no live dependency on any client database or read-replica. | Confirmed by user; removes external read-path latency and cross-system consistency concerns. |
+| A4 *(revised v2)* | **We own the application doctor table**. The `doctor` table in our DB is the only source used by the current bot runtime for phone-number routing. There is no live dependency on any external database or read-replica. | Confirmed by user; removes external read-path latency and cross-system consistency concerns. |
 | A5 | Template names and button labels are pre-approved in Interakt and immutable from our side. | Stated in context. |
 | A6 *(revised v2)* | **GenAI exposes async HTTP endpoints**. We call them with `httpx.AsyncClient` + `await` from inside the worker (never from the webhook hot path), with a hard timeout and circuit breaker. No streaming required (one user query → one full answer). Frontend latency is fully isolated from GenAI latency. | Confirmed by GenAI team. |
 | A7 *(new v2)* | `callbackData` round-trips faithfully on every Interakt event including button-click webhooks. We will pack `outbound_message_id|correlation_id` into it (≤512 chars per Interakt) and use it as the **primary chain-of-context primitive** when a user clicks a button — independent of current journey state. | Verified from `interakt_webhook.md` payloads. |
@@ -149,7 +149,7 @@ The system supports two business journeys:
 | `api.webhooks` | HTTP boundary for Interakt; validate, persist raw, enqueue, ack 200. | Webhook DTOs, raw event store, queue producer |
 | `api.health` / `api.admin` | Liveness, readiness, ops endpoints. | None business |
 | `domain.journeys.registered` | State machine + transitions for registered-user journey. | Journey state, Redis lock, GenAI port, outbound port |
-| `domain.journeys.registration` | State machine for onboarding; partial-data flow. | Master data port, parser, outbound port |
+| `domain.journeys.registration` | State machine for new-user onboarding through the WhatsApp Flow form. | Doctor repo, parser, outbound port |
 | `domain.router` | Free-text router (Cases A–D). | DB lookups, Redis cache |
 | `domain.parsers` | Registration text parsing/validation. | Pure functions |
 | `domain.consent` | Consent capture, decline, re-entry. | Consent table |
@@ -226,7 +226,7 @@ Both share modules; deployed as the same container image with different `CMD`. T
 │   ├── env.py
 │   └── versions/
 ├── models.txt                        # canonical PostgreSQL DDL (DBeaver-runnable)
-├── claude_memory.md                  # progress + decisions tracker
+├── memory.md                         # progress + decisions tracker
 ├── scripts/
 │   ├── seed_dev_data.py
 │   ├── send_test_webhook.py          # posts sample Interakt payloads to /webhooks/interakt
@@ -390,8 +390,7 @@ Both share modules; deployed as the same container image with different `CMD`. T
     so Interakt's `screen_<n>_` prefix is transparent to us.
   - Empty payload or any missing required field raises
     `RegistrationParseError`, which the handler turns into an
-    `ASSISTED_SUPPORT` transition — there is **no retry counter and
-    no partial-data confirmation step**.
+    `ASSISTED_SUPPORT` transition.
   - `email`, `address`, `city`, `state`, `pincode` are persisted as
     `NULL` (the columns remain in the schema for future use).
 - **Catalog symbols**: `TEMPLATE_USER_REGISTRATION` (Flow template,
@@ -407,14 +406,17 @@ Both share modules; deployed as the same container image with different `CMD`. T
 - **Objective**: Sync client with timeouts, retries (idempotent), circuit breaker (simple), trace IDs, contract enforcement.
 - **Outputs**: `adapters/genai/client.py`, `adapters/genai/schemas.py`, `genai_log` repo.
 - **Dependencies**: Phase 8.
+- **Current status**: Blocked until the GenAI team provides the real API contract.
 
 ### Phase 10 — Status webhook consumer (S)
 - **Objective**: Update outbound message log on `message_api_sent/delivered/read/failed/clicked`; triggers state transitions (e.g., user clicked `Satisfied`).
 - **Dependencies**: Phase 4.
+- **Current status**: Implemented with a dedicated `status` broker queue, `status_worker`, and outbound status handler.
 
 ### Phase 11 — Observability (S/M)
-- **Objective**: Structured logs everywhere, basic Prometheus-compat `/metrics` (via `prometheus-fastapi-instrumentator`), OTel hooks.
+- **Objective**: Structured logs everywhere, basic Prometheus-compatible `/metrics`, OTel/Azure Monitor hooks.
 - **Dependencies**: Phase 1.
+- **Current status**: Implemented with lightweight counters, `/metrics`, structured queue/status fields, and optional Azure Monitor bootstrap.
 
 ### Phase 12 — Testing harness (M)
 - **Objective**: Unit/integration/contract tests; replay test using fixtures from `interakt_webhook.md`.
@@ -430,12 +432,12 @@ Both share modules; deployed as the same container image with different `CMD`. T
 
 ### 7.1 Storage strategy
 - Each user has at most **one active journey** at a time, modeled as a row in `journey_state` keyed by `doctor_id`.
-- Each row has: `journey_type`, `state`, `state_entered_at`, `expected_input_kind` (e.g., `BUTTON`, `FREE_TEXT`, `REGISTRATION_TEXT`), `retry_count`, `context_jsonb` (small per-state scratchpad — e.g., `pending_fields`, `last_template_msg_id`).
+- Each row has: `journey_type`, `state`, `state_entered_at`, `expected_input_kind` (e.g., `BUTTON`, `FREE_TEXT`, `REGISTRATION_TEXT`), and `context_jsonb` (small per-state scratchpad such as `last_template_msg_id`).
 - All transitions go through the journey handler; **no journey state mutation outside handlers**.
 
 ### 7.2 Why not JSON-driven state machine files
 A JSON state-machine *looks* attractive but the journey logic here is non-trivially tied to:
-- Repository lookups (master data, consent, partial fields).
+- Repository lookups (doctor, consent, journey state).
 - External calls (GenAI, Interakt).
 - Side-effects ordering (send ack → send answer → update state).
 
@@ -451,9 +453,6 @@ class JourneyType(str, Enum):
 class RegistrationState(str, Enum):
     REG_INITIATED = "REG_INITIATED"
     AWAITING_FULL_DETAILS = "AWAITING_FULL_DETAILS"
-    PARTIAL_CONFIRM_PENDING = "PARTIAL_CONFIRM_PENDING"
-    AWAITING_REMAINING_DETAILS = "AWAITING_REMAINING_DETAILS"
-    AWAITING_CORRECTED_FULL = "AWAITING_CORRECTED_FULL"
     REGISTRATION_COMPLETED = "REGISTRATION_COMPLETED"
     ASSISTED_SUPPORT = "ASSISTED_SUPPORT"
 
@@ -595,7 +594,7 @@ Notes:
 Interakt does not deduplicate sends server-side. We compute an `idempotency_key = sha256(doctor_id|journey_state|outbound_seq|payload_hash)` and store an `outbound_message` row with `UNIQUE(idempotency_key)` **before** calling Interakt. If the call succeeds, we store the returned Interakt id. If the call fails after the row was written, a retry uses the same idempotency_key — so the row is reused, not duplicated.
 
 ### 9.3 Catalog & builder
-- `domain/messages/catalog.py` — single source of truth for the user-facing copy from §5–§6 and the template/button identifiers. Keys are symbolic (`MSG_REG_FULL_DETAILS_PROMPT`, `BTN_SATISFIED`, `TEMPLATE_DOCTOR_WELCOME_CONSENT`).
+- `domain/messages/catalog.py` — single source of truth for the user-facing copy from §5–§6 and the template/button identifiers. Keys are symbolic (`MSG_REG_COMPLETED`, `BTN_SATISFIED`, `TEMPLATE_DOCTOR_WELCOME_CONSENT`).
 - `domain/messages/builder.py` — pure functions: `(intent_symbol, params) -> OutboundIntent`. Easy to unit-test and translate later.
 
 ### 9.4 Adapter responsibilities
@@ -622,11 +621,13 @@ Webhook events `message_api_*` are joined back to `outbound_message` via `intera
 
 | Logical Queue | Purpose | Partition / Session key | Ordering | DLQ |
 |---|---|---|---|---|
-| `inbound.user-events` | All user-originated events (text, button replies). Drives journey transitions. | `phone_e164` | **Strict per-user FIFO** | yes |
-| `outbound.delivery-status` | All `message_api_*` (sent/delivered/read/failed/clicked). Updates outbound logs and may trigger flows (e.g., click on `Satisfied`). | `phone_e164` | best-effort FIFO; idempotent applier | yes |
-| `genai.requests` *(optional, deferred)* | If we move GenAI calls async to ride out spikes. Initially we keep GenAI sync inside the inbound worker. | — | — | yes |
-| `outbound.send-retry` | Failed outbound that needs delayed retry beyond the fast in-process retry. | `phone_e164` | best-effort | yes |
-| `housekeeping` | Janitor jobs (replay stuck raw events, idle session sweeps). | none | none | yes |
+| `inbound_webhook_queue` | Interakt user-message and Flow-response references after raw persistence. Drives journey transitions from inbound user events. | `full_phone_number` | **Strict per-user FIFO** | built-in Service Bus DLQ |
+| `status_webhook_queue` | Interakt `message_api_sent/delivered/read/failed/clicked` lifecycle events. | `full_phone_number` | Idempotent, best-effort per-user ordering | built-in Service Bus DLQ |
+| `genai_processing_queue` | Reserved for Phase 9+ isolation once GenAI APIs exist and independent scaling/backpressure is needed. | `full_phone_number` | Strict per-user FIFO when a user has a GenAI turn in flight | built-in Service Bus DLQ |
+| `outbound_message_queue` | Reserved for future Interakt send isolation and provider retry/replay. Current code sends inline after journey commit. | `full_phone_number` | Strict per-user FIFO for outbound chains | built-in Service Bus DLQ |
+| Retry handling | Prefer Azure Service Bus scheduled messages, delivery count, lock renewal, and built-in DLQs. A standalone `retry_queue` is optional for advanced manual replay workflows, not mandatory for the first production cut. | varies | varies | built-in Service Bus DLQ |
+
+Current code reality: the broker factory supports logical queues `inbound`, `status`, `genai`, and `outbound`. Locally they map to Redis Streams. In Azure, `BROKER_BACKEND=azure_servicebus` maps them to Service Bus queues with sessions keyed by `full_phone_number`.
 
 ### 10.2 Why per-user sessions
 A doctor sending `text → button → text` quickly must not have those events processed in parallel — that creates state-race nightmares. Service Bus **sessions** (or Redis Streams partitioned by phone) give us message-level FIFO **per-user** with concurrency **across users**.
@@ -639,8 +640,8 @@ A doctor sending `text → button → text` quickly must not have those events p
 - **Alternative**: RabbitMQ with consistent-hash exchange (`x-consistent-hash`) — wire-compatible mental model with Service Bus sessions; we keep this as an optional compose service for stress testing.
 
 ### 10.4 Cloud (Azure) broker plan
-- Azure Service Bus **queues with sessions enabled** for `inbound.user-events` and `outbound.delivery-status`.
-- `SessionId = phone_e164`. Consumers use `ServiceBusSessionReceiver`.
+- Azure Service Bus **queues with sessions enabled** for `inbound_webhook_queue`, `genai_processing_queue`, `outbound_message_queue`, and `status_webhook_queue` where per-user ordering is required.
+- `SessionId = full_phone_number`. Consumers use session-aware receivers so one doctor's message sequence is processed in order while other doctors process concurrently.
 - Built-in DLQ on max delivery count (default 5); we also set TTL = 24h.
 - **Duplicate detection** enabled (10-min window) using `MessageId = canonical_event_id`.
 
@@ -692,7 +693,7 @@ Concrete impls: `RedisStreamsBroker`, `AzureServiceBusBroker`, `InMemoryBroker` 
 ### 11.5 Free-text + button mix
 - If `expected_input_kind = BUTTON` and a free-text arrives:
   - For `AWAITING_ANSWER_BUTTON` (post-scientific-answer), context says we should treat **the free text as the next query** (loop continues). We honor that.
-  - For `PARTIAL_CONFIRM_PENDING` and `CONSENT_PENDING`, we send Fallback 1 ("please choose one of the options").
+  - For `CONSENT_PENDING`, we send Fallback 1 ("please choose one of the options").
 
 ### 11.6 Replay safety
 - All outbound writes happen **before** Interakt API call (state = `PENDING_SEND`); the response transitions it to `SENT` or `FAILED`. A crash mid-call leaves a `PENDING_SEND` row → janitor reconciles by checking Interakt or by re-sending using the same `idempotency_key` (which Interakt won't dedupe, so we accept a 1-in-a-million potential duplicate; alternative is to require manual reconciliation — simpler).
@@ -719,7 +720,7 @@ The Redis lock + the DB `version` column means even if two workers somehow get t
 
 | Table | Purpose |
 |---|---|
-| `doctor` | **Owned master + canonical user record** (one per phone). Holds `is_profile_complete` flag. Loaded from client-supplied data via a one-shot import script; thereafter we own it. |
+| `doctor` | **Application doctor record** (one per phone). Used by the current bot runtime for known-user routing and registration completion. |
 | `consent` | Latest consent snapshot per doctor + history table. |
 | `whatsapp_onboarding_status` | Has the user been sent the consent template at least once. |
 | `journey_state` | Active journey + state per doctor (1:1 with doctor). |
@@ -729,8 +730,7 @@ The Redis lock + the DB `version` column means even if two workers somehow get t
 | `outbound_message` | Outbound dispatch attempts and lifecycle; carries `callback_data` for chain resolution. |
 | `webhook_event_raw` | Raw Interakt payloads (replay log). |
 | `genai_interaction` | Each GenAI request/response pair. |
-| `registration_attempt` | Each parse attempt for a user with errors and retry counter. |
-| `partial_profile_confirmation` | Captures the Yes/No partial-data confirmation event. |
+| `registration_attempt` | Each malformed registration form payload captured for debugging and support. |
 
 > The v1 separate `master_data_doctor` mirror table is **removed** (per A4: we own the master directly).
 > The v1 `outbound_idempotency` separate table is **removed** — the unique index on `outbound_message.idempotency_key` is sufficient.
@@ -749,9 +749,6 @@ CREATE TYPE journey_type AS ENUM ('registration', 'registered');
 CREATE TYPE registration_state AS ENUM (
     'REG_INITIATED',
     'AWAITING_FULL_DETAILS',
-    'PARTIAL_CONFIRM_PENDING',
-    'AWAITING_REMAINING_DETAILS',
-    'AWAITING_CORRECTED_FULL',
     'REGISTRATION_COMPLETED',
     'ASSISTED_SUPPORT'
 );
@@ -828,7 +825,6 @@ CREATE TABLE journey_state (
     state_registered        registered_state,
     expected_input_kind     TEXT,                          -- 'BUTTON' | 'FREE_TEXT' | 'REGISTRATION_TEXT'
     expected_outbound_id    UUID,                          -- which outbound's reply we are awaiting (for chain check)
-    retry_count             INT NOT NULL DEFAULT 0,
     context                 JSONB NOT NULL DEFAULT '{}'::jsonb,
     last_event_received_at  TIMESTAMPTZ(6),
     last_processed_event_id TEXT,
@@ -935,23 +931,13 @@ CREATE INDEX idx_genai_doctor_time ON genai_interaction(doctor_id, created_at DE
 CREATE TABLE registration_attempt (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     doctor_id       UUID NOT NULL REFERENCES doctor(id),
-    raw_text        TEXT NOT NULL,
+  raw_payload     JSONB NOT NULL,
     parsed          JSONB,
     is_valid        BOOLEAN NOT NULL,
     errors          JSONB,
-    attempt_no      INT NOT NULL,
     created_at      TIMESTAMPTZ(6) NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX idx_reg_attempt_doctor ON registration_attempt(doctor_id, created_at DESC);
-
-CREATE TABLE partial_profile_confirmation (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    doctor_id       UUID NOT NULL REFERENCES doctor(id),
-    presented_data  JSONB NOT NULL,
-    confirmed       BOOLEAN,                                -- NULL = pending; TRUE/FALSE on response
-    responded_at    TIMESTAMPTZ(6),
-    created_at      TIMESTAMPTZ(6) NOT NULL DEFAULT clock_timestamp()
-);
 ```
 
 ### 12.4 Indexing strategy
@@ -1146,14 +1132,12 @@ GENAI_CIRCUIT_BREAKER_FAILS=5
 GENAI_CIRCUIT_BREAKER_WINDOW_SECONDS=60
 
 # === Broker ===
-BROKER_DRIVER=redis_streams          # redis_streams|azure_servicebus|in_memory
-BROKER_INBOUND_TOPIC=inbound.user-events
-BROKER_STATUS_TOPIC=outbound.delivery-status
-BROKER_RETRY_TOPIC=outbound.send-retry
-BROKER_GROUP_INBOUND=inbound-workers
-BROKER_MAX_DELIVERY_COUNT=5
-BROKER_VISIBILITY_TIMEOUT_SECONDS=60
-AZURE_SERVICEBUS_CONNECTION_STRING=
+BROKER_BACKEND=redis_streams         # redis_streams|azure_servicebus
+BROKER_INBOUND_STREAM=wabot.inbound
+BROKER_INBOUND_GROUP=wabot.inbound.workers
+BROKER_DLQ_STREAM=wabot.inbound.dlq
+SERVICEBUS_CONNECTION_STRING=
+SERVICEBUS_QUEUE_INBOUND=wabot-inbound
 
 # === Workers ===
 INBOUND_WORKER_CONCURRENCY=8
@@ -1167,8 +1151,8 @@ REGISTRATION_MAX_RETRIES=2
 
 # === Observability ===
 OTEL_ENABLED=false
-OTEL_EXPORTER_OTLP_ENDPOINT=
 METRICS_ENABLED=true
+APPLICATIONINSIGHTS_CONNECTION_STRING=
 ```
 
 ---
@@ -1177,7 +1161,8 @@ METRICS_ENABLED=true
 
 ### 16.1 What runs locally
 - **App container** (FastAPI, role=api).
-- **Worker container** (same image, role=worker).
+- **Worker container** (same image, role=worker) for inbound user events.
+- **Status worker container** (same image, role=status-worker) for Interakt lifecycle events.
 - **Redis** container (compose).
 - **PostgreSQL**: client's Azure Postgres via DBeaver — **do not** run a local Postgres unless the dev is offline. The compose file ships an *optional* `postgres` profile (`docker compose --profile local-db up`) for offline work; default profile uses the `DB_*` component env vars from `.env` to build the asyncpg DSN at app startup (host: `docbotdatabase.postgres.database.azure.com`, user: `drbot_admin`, schema: `wabot`, SSL: required).
 - **Optional**: RabbitMQ container via `--profile rabbit` for stress/queue experiments.
@@ -1188,14 +1173,13 @@ METRICS_ENABLED=true
 - A `tools` service that runs migrations: `docker compose run --rm tools alembic upgrade head`.
 
 ### 16.3 Webhook testing
-- **Thunder Client** (VS Code extension) collection in `scripts/thunderclient/wabot.thunder-collection.json` — pre-populated requests using sample payloads from `interakt_webhook.md`. Postman is blocked on the dev's machine.
-- For Interakt to actually reach a local instance, **ngrok** or **cloudflared tunnel** is documented in README. Until then, replay via Thunder Client is sufficient.
-- `scripts/send_test_webhook.py` POSTs the fixtures from `tests/fixtures/interakt_webhooks/` for fast smoke tests.
+- Local public tunneling is not available on the company laptop and is not part of this project.
+- Local journey testing uses `scripts/drive_webhook.py` to POST simulated Interakt payloads to `http://127.0.0.1:8000/webhooks/<INTERAKT_WEBHOOK_PATH_SECRET>/interakt`.
+- After Azure App Service deployment, Interakt should be configured with the App Service HTTPS URL: `https://<app-name>.azurewebsites.net/webhooks/<INTERAKT_WEBHOOK_PATH_SECRET>/interakt`.
 
 ### 16.4 Seed data
 - `scripts/seed_dev_data.py` inserts directly into our `doctor` table:
   - One fully-registered doctor (`is_profile_complete=true`, all fields filled).
-  - One partial doctor (`is_profile_complete=false`, missing email/pincode).
   - One unknown phone (no `doctor` row at all) — used to drive the new-user path.
 
 ### 16.5 Local queue
@@ -1233,9 +1217,8 @@ METRICS_ENABLED=true
 - Queue messages carry the correlation id in headers — workers re-bind on consume.
 
 ### 18.3 Metrics (Prometheus-compatible)
-- Counters: `webhook_received_total{type}`, `webhook_dedupe_drop_total`, `outbound_sent_total{kind,status}`, `genai_calls_total{outcome}`.
-- Histograms: `webhook_ack_seconds`, `worker_handle_seconds{journey,state}`, `genai_latency_seconds`, `interakt_send_latency_seconds`.
-- Gauges: `queue_lag_messages`, `inbound_lock_holders`.
+- Implemented counters: `wabot_webhook_received_total`, `wabot_webhook_duplicate_total`, `wabot_webhook_enqueued_total`, `wabot_webhook_enqueue_failed_total`, `wabot_outbound_status_events_total`, and `wabot_worker_messages_total`.
+- Planned next metrics: `outbound_sent_total{kind,status}`, `genai_calls_total{outcome}`, `webhook_ack_seconds`, `worker_handle_seconds{journey,state}`, `genai_latency_seconds`, `interakt_send_latency_seconds`, `queue_lag_messages`, and `inbound_lock_holders`.
 
 ### 18.4 Audit
 - Every state change → `journey_state_history` row.
@@ -1292,9 +1275,8 @@ METRICS_ENABLED=true
 | R6 | Free-text router latency (DB lookup on every inbound). | Latency spikes. | **Resolved in v2**: write-through `user:{full_phone}` Redis hash means steady-state hot path is zero DB calls (\u00a713). | Done |
 | R7 | Interakt outbound has no native idempotency. | Possible duplicates on retry. | Pre-write `outbound_message` with unique `idempotency_key`; retry only on connection-level failures with no `interakt_message_id` returned. | Now |
 | R8 | GenAI failure could trap users in `GENAI_PROCESSING`. | Stuck users. | Hard timeout, exponential backoff with jitter, circuit breaker; on failure emit Fallback 3 and revert state to `AWAITING_FREE_TEXT`. | Now |
-| R9 | Registration retry counter has no time bound. | Edge: long-spread retries permanently lock the user. | Counter resets only on a successful parse or on explicit `ASSISTED_SUPPORT` clear. Acceptable given 2-strike rule + hotline path. | Accepted |
-| R10 | Partial-data confirmation copy could literalize missing placeholders. | UX bug. | Builder skips lines whose value is empty; if no available fields, fall back to "no data found" path. | Now |
-| R11 | Free text while `expected_input_kind=BUTTON`. | Ambiguity. | Per \u00a711.5: post-scientific-answer treats free text as next query (loop continues); for consent and partial-confirm steps, send Fallback 1. | Now |
+| R9 | Malformed Flow payloads can block registration. | User cannot complete onboarding. | Transition to `ASSISTED_SUPPORT` and keep the malformed payload in `registration_attempt` for debugging. | Now |
+| R10 | Free text while `expected_input_kind=BUTTON`. | Ambiguity. | Per \u00a711.5: post-scientific-answer treats free text as next query (loop continues); for consent, send Fallback 1. | Now |
 | R12 | Stale historical button click (user scrolls up days later). | Could mutate state incorrectly. | **Resolved in v2** via `callbackData` chain check (\u00a77.8): clicks that resolve to an `outbound_message_id` older than the latest forward action are no-ops. | Done |
 | R13 | Template name registry not validated at send time. | Typo causes 4xx. | Two templates only \u2014 names live in env. Add a validation feature flag later if templates grow. | Later |
 | R14 | v1 planned to expire conversation sessions after 7d. | Conflicts with "no expiry" rule. | **Resolved in v2**: conversation sessions never auto-close; janitor only trims very old rows for storage hygiene (>180d), not for behavior. | Done |
@@ -1314,16 +1296,15 @@ METRICS_ENABLED=true
 ### What to build first (the "vertical slice")
 1. **Phase 0–2** (skeleton, config, DB).
 2. **Webhook ingestion** (Phase 3) end-to-end with raw persistence and dedupe.
-3. **Outbound text send** (Phase 6 partial: `Text` only) so we can observe both sides.
+3. **Outbound text send** (Phase 6 limited to `Text` first) so we can observe both sides.
 4. **Free-text router → user_registration (new user path)**: simplest journey, exercises every layer (router, journey, parser, repo, outbound).
 5. **Consent template send + accept/decline** in registered-user journey.
 6. **GenAI integration** with mocked responses, then real.
 7. **Status webhook consumer** and outbound lifecycle.
-8. **Partial-data path** in registration.
-9. **Hotline + scientific answer flow**.
-10. **Janitors / DLQ / admin endpoints**.
-11. **Observability hardening + load test**.
-12. **Azure-deployment doc & migration**.
+8. **Hotline + scientific answer flow**.
+9. **Janitors / DLQ / admin endpoints**.
+10. **Observability hardening + load test**.
+11. **Azure-deployment doc & migration**.
 
 ### Files to create first (in order)
 1. `pyproject.toml`, `Dockerfile`, `docker-compose.yml`, `.env.example`.
@@ -1358,13 +1339,12 @@ METRICS_ENABLED=true
 
 ## 22. Revision Log
 
-### v2.1 — client update (registration form changes)
-- **Registration form now has 7 fields** (was 6). Added `Speciality` (e.g., Cardiology, Diabetes, Neurology, Radiology) between `Full Name` and `Address`.
-- **Delimiter changed from newline → `#`** for all registration prompts and the parser. Single-line input, tokens trimmed.
-- **`Full Name` is split on first whitespace** into `first_name` and `last_name` at parse time.
-- **Schema change** (`models.txt` + §12.3): `doctor.full_name` removed; replaced with `doctor.first_name`, `doctor.last_name`, and `doctor.speciality`. New index `idx_doctor_speciality`.
-- **Updated copy** in `context_final.md` §6.6, §6.7, §6.8, §6.9, §6.11. Partial-confirm message now includes a `Speciality:` row.
-- **Parser contract** documented in Phase 7 of this plan.
+### v2.1 — registration Flow form changes
+- Registration now uses the Interakt WhatsApp Flow template `user_registration_v1` instead of free-text detail collection.
+- Form fields are First Name, Last Name, optional MCI-ID, and Speciality.
+- The parser reads `message_api_flow_response` payloads from `nfm_reply.response_json`.
+- Schema change (`models.txt` + §12.3): `doctor.first_name`, `doctor.last_name`, `doctor.mci_id`, and `doctor.speciality` are registration-owned fields.
+- Parser contract documented in Phase 7 of this plan.
 
 ### v2 (post architecture review) \u2014 changes vs v1
 - **A4 corrected**: we own the master user table directly. Removed `master_data_doctor`. `doctor.is_profile_complete` is the source of completeness.
@@ -1377,4 +1357,12 @@ METRICS_ENABLED=true
 - **`callbackData` chain-of-context**: outbound dispatcher always sets `callback_data = "{outbound_id}|{correlation_id}"`; orchestrator uses it to detect stale historical button clicks safely without a time window.
 - **Webhook auth simplified**: shared-secret URL only; no IP allowlist / HMAC complexity in v1.
 - **DDL consolidated**: removed `master_data_doctor`, `webhook_event_dedupe`, `outbound_idempotency`, `feature_flags` tables. Added `outbound_message.callback_data`, `outbound_message.state_when_sent`, `journey_state.expected_outbound_id`, `conversation_message.callback_data`.
-- **Tooling**: Thunder Client replaces Postman for local API testing.\n- **UUIDs**: switched to `gen_random_uuid()` (built-in) to avoid the `pg_uuidv7` extension dependency for the 15-day timeline.\n- **Retries**: standardized on **exponential backoff with jitter** via `tenacity` for both Interakt outbound and GenAI client.\n- **STOP/UNSUBSCRIBE**: added explicit handling at the router level (R18).\n- **Companion files**: `models.txt` and `claude_memory.md` introduced.\n\n---\n\n> **End of plan (v2).** Code generation should now proceed module-by-module against this document, beginning at Phase 0 and not skipping ahead past the dependency chain in \u00a76. Update `claude_memory.md` after every meaningful checkpoint.
+- **Tooling**: Thunder Client replaces Postman for local API testing.
+- **UUIDs**: switched to `gen_random_uuid()` (built-in) to avoid the `pg_uuidv7` extension dependency for the 15-day timeline.
+- **Retries**: standardized on **exponential backoff with jitter** via `tenacity` for both Interakt outbound and GenAI client.
+- **STOP/UNSUBSCRIBE**: added explicit handling at the router level (R18).
+- **Companion files**: `models.txt` and `memory.md` introduced.
+
+---
+
+> **End of plan (v2).** Code generation should now proceed module-by-module against this document, beginning at Phase 0 and not skipping ahead past the dependency chain in §6. Update `memory.md` after every meaningful checkpoint.

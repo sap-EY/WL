@@ -20,13 +20,14 @@ from fastapi import FastAPI
 
 from wabot import __version__
 from wabot.adapters.broker import close_broker
-from wabot.api.routers import health, webhooks
+from wabot.api.routers import health, metrics, webhooks
 from wabot.cache import close_redis, get_redis
 from wabot.data.db import dispose_engine, get_engine
 from wabot.infra.config import AppSettings, get_settings
 from wabot.infra.correlation import CorrelationMiddleware
 from wabot.infra.errors import register_exception_handlers
 from wabot.infra.logging import configure_logging, get_logger
+from wabot.infra.telemetry import configure_telemetry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -45,6 +46,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings: AppSettings = get_settings()
     configure_logging(settings)
+    configure_telemetry(settings)
     get_engine(settings)
     get_redis(settings)
     logger.info(
@@ -85,6 +87,7 @@ def create_app() -> FastAPI:
 def _register_routes(app: FastAPI) -> None:
     app.include_router(health.router)
     app.include_router(webhooks.router)
+    app.include_router(metrics.router)
     # Future phases:
     #   from wabot.api.routers import admin
     #   app.include_router(admin.router, prefix="/admin")

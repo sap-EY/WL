@@ -11,6 +11,7 @@ from __future__ import annotations
 from wabot.adapters.broker.base import (
     BrokerConsumeError,
     BrokerEnqueueError,
+    BrokerQueue,
     InboundBroker,
     InboundMessage,
 )
@@ -19,6 +20,7 @@ from wabot.adapters.broker.factory import close_broker, get_broker
 __all__ = [
     "BrokerConsumeError",
     "BrokerEnqueueError",
+    "BrokerQueue",
     "InboundBroker",
     "InboundMessage",
     "close_broker",

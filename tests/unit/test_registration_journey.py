@@ -140,13 +140,13 @@ def _decision_fresh_a() -> RoutingDecision:
 
 def _decision_resume_d() -> RoutingDecision:
     return RoutingDecision(
-        case=RoutingCase.D_RESUME_REGISTRATION,
+        case=RoutingCase.RESUME_REGISTRATION,
         journey=JourneyType.REGISTRATION,
         is_resume=True,
     )
 
 
-def _journey(state: RegistrationState, *, retry_count: int = 0) -> Any:
+def _journey(state: RegistrationState) -> Any:
     return SimpleNamespace(
         doctor_id=uuid.uuid4(),
         journey=JourneyType.REGISTRATION,
@@ -154,7 +154,6 @@ def _journey(state: RegistrationState, *, retry_count: int = 0) -> Any:
         state_registered=None,
         expected_input_kind=ExpectedInputKind.REGISTRATION_TEXT.value,
         expected_outbound_id=None,
-        retry_count=retry_count,
         context={},
     )
 
@@ -198,7 +197,6 @@ async def test_case_a_creates_shell_and_sends_form_template(
     assert result.next_journey == JourneyType.REGISTRATION
     assert result.next_registration_state == RegistrationState.AWAITING_FULL_DETAILS
     assert result.expected_input_kind == ExpectedInputKind.REGISTRATION_TEXT
-    assert result.retry_count == 0
     assert len(result.outbound_intents) == 1
     intent = result.outbound_intents[0]
     assert intent.symbol == MessageSymbol.TEMPLATE_USER_REGISTRATION.value

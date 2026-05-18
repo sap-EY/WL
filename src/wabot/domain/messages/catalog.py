@@ -12,7 +12,7 @@ The user-facing copy and the button labels live here so that:
   resolves to the *same* `outbound_message` row.
 
 Phase 6 ships the symbol enum plus the few entries every other
-phase will need (registration prompts, the consent template, the
+phase will need (registration completion/support messages, the consent template, the
 hotline template, the post-answer "satisfied" buttons). Phases 7\u20139
 will expand this file as the journeys come online; the contract
 stays stable.
@@ -35,10 +35,6 @@ class MessageSymbol(StrEnum):
     """Stable identifier for every outbound message we send."""
 
     # Registration journey -------------------------------------------------
-    MSG_REG_FULL_DETAILS_PROMPT = "MSG_REG_FULL_DETAILS_PROMPT"
-    MSG_REG_RETRY_PROMPT = "MSG_REG_RETRY_PROMPT"
-    MSG_REG_REMAINING_FIELDS_PROMPT = "MSG_REG_REMAINING_FIELDS_PROMPT"
-    MSG_REG_PARTIAL_CONFIRM_PROMPT = "MSG_REG_PARTIAL_CONFIRM_PROMPT"
     MSG_REG_COMPLETED = "MSG_REG_COMPLETED"
     MSG_REG_ASSISTED_SUPPORT = "MSG_REG_ASSISTED_SUPPORT"
 
@@ -81,50 +77,6 @@ class CatalogEntry:
 # emit each prompt. Keeping the strings here (rather than inline in the
 # handlers) means a copy change is a one-line PR.
 CATALOG: dict[MessageSymbol, CatalogEntry] = {
-    MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT: CatalogEntry(
-        symbol=MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT,
-        kind="TEXT",
-        text=(
-            "Hello Doctor \U0001f44b\n"
-            "Welcome to Wockhardt Support \U0001fa7a\n\n"
-            "To complete your registration, please reply with all your details in a "
-            'single message, using "#" to separate each field, in this exact order:\n\n'
-            "Full Name#Speciality#Address#Email#City#State#Pincode\n\n"
-            "Example:\n"
-            "Rahul Sharma#Cardiology#21 MG Road#rahul@email.com#Mumbai#Maharashtra#400001\n\n"
-            "Note: You may include spaces within any field \u2014 leading and trailing "
-            "spaces will be ignored. For Full Name, please send your first and last "
-            "name separated by a space (e.g., Rahul Sharma)."
-        ),
-    ),
-    MessageSymbol.MSG_REG_RETRY_PROMPT: CatalogEntry(
-        symbol=MessageSymbol.MSG_REG_RETRY_PROMPT,
-        kind="TEXT",
-        text=(
-            "Sorry, I could not process your details correctly.\n"
-            'Please resend them in a single message, using "#" to separate each '
-            "field, in this exact order:\n\n"
-            "Full Name#Speciality#Address#Email#City#State#Pincode\n\n"
-            "Example:\n"
-            "Rahul Sharma#Cardiology#21 MG Road#rahul@email.com#Mumbai#Maharashtra#400001"
-        ),
-    ),
-    MessageSymbol.MSG_REG_REMAINING_FIELDS_PROMPT: CatalogEntry(
-        symbol=MessageSymbol.MSG_REG_REMAINING_FIELDS_PROMPT,
-        kind="TEXT",
-        text=(
-            "Thank you \U0001f64f\n"
-            'Please send the remaining details in a single message, separated by "#".'
-        ),
-    ),
-    MessageSymbol.MSG_REG_PARTIAL_CONFIRM_PROMPT: CatalogEntry(
-        symbol=MessageSymbol.MSG_REG_PARTIAL_CONFIRM_PROMPT,
-        kind="BUTTONS",
-        text=(
-            "Hello Doctor \U0001f44b\n"
-            "We found some details linked to your number. Are these details correct?"
-        ),
-    ),
     MessageSymbol.MSG_REG_COMPLETED: CatalogEntry(
         symbol=MessageSymbol.MSG_REG_COMPLETED,
         kind="TEXT",
@@ -215,8 +167,6 @@ CATALOG: dict[MessageSymbol, CatalogEntry] = {
 # the `reply.id` field of `message_received` events; the registered
 # journey handler keys off them.
 class ButtonId(StrEnum):
-    REG_PARTIAL_CONFIRM_YES = "REG_PARTIAL_CONFIRM_YES"
-    REG_PARTIAL_CONFIRM_NO = "REG_PARTIAL_CONFIRM_NO"
     REGISTERED_ICEBREAKER_CALL_HOTLINE = "REGISTERED_ICEBREAKER_CALL_HOTLINE"
     REGISTERED_ANSWER_SATISFIED = "REGISTERED_ANSWER_SATISFIED"
     REGISTERED_ANSWER_CALL_HOTLINE = "REGISTERED_ANSWER_CALL_HOTLINE"

@@ -19,16 +19,16 @@ _PHONE = "919999900001"
 class TestBuildText:
     def test_uses_catalog_text(self) -> None:
         intent = build_text(
-            symbol=MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT,
+            symbol=MessageSymbol.MSG_REG_COMPLETED,
             full_phone_number=_PHONE,
         )
         assert intent.kind == "TEXT"
         assert intent.text  # catalog populates copy
-        assert intent.symbol == MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT.value
+        assert intent.symbol == MessageSymbol.MSG_REG_COMPLETED.value
 
     def test_text_override_wins(self) -> None:
         intent = build_text(
-            symbol=MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT,
+            symbol=MessageSymbol.MSG_REG_COMPLETED,
             full_phone_number=_PHONE,
             text_override="custom",
         )
@@ -70,7 +70,7 @@ class TestBuildButtons:
     def test_kind_mismatch_raises(self) -> None:
         with pytest.raises(MessageBuildError):
             build_buttons(
-                symbol=MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT,
+                symbol=MessageSymbol.MSG_REG_COMPLETED,
                 full_phone_number=_PHONE,
                 buttons=[("a", "A")],
             )
@@ -91,7 +91,7 @@ class TestBuildTemplate:
     def test_kind_mismatch_raises(self) -> None:
         with pytest.raises(MessageBuildError):
             build_template(
-                symbol=MessageSymbol.MSG_REG_FULL_DETAILS_PROMPT,
+                symbol=MessageSymbol.MSG_REG_COMPLETED,
                 full_phone_number=_PHONE,
                 template_name="x",
             )

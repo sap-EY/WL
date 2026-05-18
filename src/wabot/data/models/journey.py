@@ -48,7 +48,6 @@ class JourneyState(Base):
     )
     expected_input_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     expected_outbound_id: Mapped[uuid.UUID | None] = mapped_column(UuidPg, nullable=True)
-    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     context: Mapped[dict[str, Any]] = mapped_column(
         JsonB, nullable=False, server_default=text("'{}'::jsonb")
     )

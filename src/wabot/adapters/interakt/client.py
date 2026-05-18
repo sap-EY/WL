@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from tenacity import (
@@ -39,7 +39,7 @@ from wabot.infra.logging import get_logger
 try:
     import truststore
 except ImportError:  # pragma: no cover - truststore is a hard dep
-    truststore = None
+    truststore = cast("Any", None)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -142,6 +142,18 @@ class InteraktClient:
         `InteraktPermanentError` immediately.
         """
         body = build_request_body(intent, callback_data=callback_data)
+        if self._settings.feature_dry_run_outbound:
+            message_id = f"dry-run:{callback_data}"
+            logger.info(
+                "wabot.interakt.dry_run_send",
+                message_id=message_id,
+                intent_kind=intent.kind,
+                symbol=intent.symbol,
+            )
+            return InteraktSendResult(
+                interakt_message_id=message_id,
+                raw_response={"dry_run": True, "request": body},
+            )
 
         async for attempt in AsyncRetrying(
             reraise=True,

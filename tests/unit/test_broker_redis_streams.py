@@ -90,7 +90,7 @@ async def test_consume_returns_empty_list_on_idle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ack_calls_xack_with_settings_group() -> None:
+async def test_ack_calls_xack_with_bound_group() -> None:
     client = MagicMock()
     client.xack = AsyncMock(return_value=1)
     broker = _make_broker(client)
@@ -98,7 +98,15 @@ async def test_ack_calls_xack_with_settings_group() -> None:
     client.xack.assert_awaited_once()
     args = client.xack.await_args.args
     assert args[0] == "wabot.inbound"
+    assert args[1] == "wabot.inbound.workers"
     assert args[2] == "1700000000-0"
+
+
+def test_status_queue_uses_status_stream_and_group() -> None:
+    client = MagicMock()
+    broker = RedisStreamsBroker(client=client, queue="status")
+    assert broker._stream == "wabot.status"
+    assert broker._group == "wabot.status.workers"
 
 
 @pytest.mark.asyncio

@@ -387,7 +387,6 @@ async def test_user_event_dedupes_when_last_processed_matches(
         state_registered=RegisteredState.AWAITING_FREE_TEXT,
         expected_input_kind="FREE_TEXT",
         expected_outbound_id=None,
-        retry_count=0,
         context={},
     )
     journey_repo = MagicMock()

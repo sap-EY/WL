@@ -18,10 +18,7 @@ from wabot.data.models.genai import GenAIInteraction
 from wabot.data.models.journey import JourneyState, JourneyStateHistory
 from wabot.data.models.onboarding import WhatsappOnboardingStatus
 from wabot.data.models.outbound import OutboundMessage
-from wabot.data.models.registration import (
-    PartialProfileConfirmation,
-    RegistrationAttempt,
-)
+from wabot.data.models.registration import RegistrationAttempt
 from wabot.data.models.webhook import WebhookEventRaw
 
 __all__ = [
@@ -34,7 +31,6 @@ __all__ = [
     "JourneyState",
     "JourneyStateHistory",
     "OutboundMessage",
-    "PartialProfileConfirmation",
     "RegistrationAttempt",
     "WebhookEventRaw",
     "WhatsappOnboardingStatus",

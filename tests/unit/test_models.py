@@ -22,7 +22,6 @@ from wabot.data.models import (
     JourneyState,
     JourneyStateHistory,
     OutboundMessage,
-    PartialProfileConfirmation,
     RegistrationAttempt,
     WebhookEventRaw,
     WhatsappOnboardingStatus,
@@ -41,7 +40,6 @@ EXPECTED_TABLES = {
     "webhook_event_raw",
     "genai_interaction",
     "registration_attempt",
-    "partial_profile_confirmation",
 }
 
 
@@ -102,7 +100,6 @@ def test_foreign_keys_target_doctor() -> None:
         OutboundMessage: "wabot.doctor.id",
         GenAIInteraction: "wabot.doctor.id",
         RegistrationAttempt: "wabot.doctor.id",
-        PartialProfileConfirmation: "wabot.doctor.id",
     }
     for model, target in fk_targets.items():
         fk_columns = [c for c in model.__table__.columns if c.foreign_keys]

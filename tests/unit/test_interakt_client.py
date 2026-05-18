@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic_settings import SettingsConfigDict
 
 from wabot.adapters.interakt.client import (
     InteraktClient,
@@ -91,6 +92,38 @@ class TestBuildRequestBody:
 
 
 class TestInteraktClientSend:
+    @pytest.mark.asyncio
+    async def test_dry_run_returns_synthetic_message_without_http_call(self) -> None:
+        class DryRunSettings(_settings().__class__):
+            model_config = SettingsConfigDict(env_file=None, extra="ignore", case_sensitive=False)
+
+        settings = DryRunSettings(
+            DB_HOST="localhost",
+            DB_USER="user",
+            DB_PASSWORD="pw",
+            APP_FEATURE_FLAG_DRY_RUN_OUTBOUND=True,
+        )
+        called = False
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            nonlocal called
+            called = True
+            return httpx.Response(500, text="should not be called")
+
+        http = httpx.AsyncClient(
+            base_url="https://api.interakt.ai", transport=httpx.MockTransport(handler)
+        )
+        client = InteraktClient(settings, http_client=http, sleep=_no_sleep)
+        try:
+            result = await client.send(_text_intent(), callback_data="cb-dry")
+        finally:
+            await http.aclose()
+
+        assert called is False
+        assert result.interakt_message_id == "dry-run:cb-dry"
+        assert result.raw_response["dry_run"] is True
+        assert result.raw_response["request"]["type"] == "Text"
+
     @pytest.mark.asyncio
     async def test_success_returns_message_id(self) -> None:
         captured: dict[str, Any] = {}
