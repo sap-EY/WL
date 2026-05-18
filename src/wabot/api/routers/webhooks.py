@@ -168,7 +168,9 @@ async def receive_interakt_webhook(  # noqa: PLR0915
         )
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         inc("wabot_webhook_persist_failed_total", labels={"type": event_type})
-        return WebhookAckResponse(status="duplicate")
+        # 503 tells Interakt to retry; the body honestly reports the
+        # failure rather than masquerading as a duplicate.
+        return WebhookAckResponse(status="error")
 
     if not is_new:
         logger.info(

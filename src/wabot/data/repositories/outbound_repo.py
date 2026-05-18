@@ -124,12 +124,25 @@ class OutboundRepository:
         """Apply a provider status without regressing the lifecycle.
 
         Interakt may deliver status webhooks out of order. Timestamp
-        columns are filled idempotently, while the aggregate `status`
-        only moves forward according to `_STATUS_RANK`.
+        columns are always filled idempotently (so forensics never
+        lose a signal), while the aggregate ``status`` column moves
+        forward strictly according to ``_STATUS_RANK``.
+
+        Ranking rationale (`implementation_plan.md` §9.5):
+
+        * ``FAILED`` is placed between ``SENT`` and ``DELIVERED`` so a
+          late ``message_api_failed`` only wins when the message had
+          not yet been observed as delivered/read/clicked. A
+          delivered-then-failed sequence is treated as a transport
+          glitch on Interakt's side and does NOT downgrade the
+          aggregate status — ``failed_at`` and ``failure_reason`` are
+          still recorded for audit.
+        * ``CLICKED`` is the highest rank because it strictly implies
+          ``READ`` (and therefore ``DELIVERED`` / ``SENT``).
         """
         current_rank = _STATUS_RANK[row.status]
         next_rank = _STATUS_RANK[status]
-        if next_rank >= current_rank:
+        if next_rank > current_rank:
             row.status = status
         if status is OutboundStatus.SENT:
             row.sent_at = row.sent_at or at
@@ -145,11 +158,15 @@ class OutboundRepository:
             row.clicked_button_text = clicked_button_text or row.clicked_button_text
 
 
+# Forward-only lifecycle. ``FAILED`` sits just above ``SENT`` so a
+# late failure cannot clobber an already-delivered/read/clicked row,
+# but a transient ``PENDING_SEND → FAILED`` (no Interakt id yet) and
+# ``SENT → FAILED`` (provider rejected after acceptance) still apply.
 _STATUS_RANK: dict[OutboundStatus, int] = {
     OutboundStatus.PENDING_SEND: 0,
     OutboundStatus.SENT: 1,
-    OutboundStatus.DELIVERED: 2,
-    OutboundStatus.READ: 3,
-    OutboundStatus.CLICKED: 4,
-    OutboundStatus.FAILED: 5,
+    OutboundStatus.FAILED: 2,
+    OutboundStatus.DELIVERED: 3,
+    OutboundStatus.READ: 4,
+    OutboundStatus.CLICKED: 5,
 }

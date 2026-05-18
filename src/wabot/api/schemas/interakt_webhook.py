@@ -127,11 +127,22 @@ class InteraktEnvelope(_Open):
         return cust.phone_number
 
 
-WebhookAck = Literal["ok", "duplicate"]
+WebhookAck = Literal["ok", "duplicate", "error"]
 
 
 class WebhookAckResponse(BaseModel):
-    """Response body for `/webhooks/.../interakt`. Always returns 200."""
+    """Response body for `/webhooks/.../interakt`.
+
+    Returned with HTTP 200 for the happy and duplicate paths and with
+    HTTP 503 for the persist-failed path (so Interakt retries). The
+    body `status` mirrors the outcome:
+
+    * ``ok``        — fresh event durably persisted (and enqueued when
+                       the type is routable).
+    * ``duplicate`` — short-circuited by cache or DB dedupe; no work
+                       performed.
+    * ``error``     — persistence failed; client should retry.
+    """
 
     status: WebhookAck
     event_id: str | None = None

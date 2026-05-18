@@ -35,3 +35,14 @@ logs/
 # Local DB / migrations artifacts
 *.sqlite3
 *.db
+
+# Local scratch / inspection artifacts
+payload.json
+form.json
+wa_form.txt
+diff_reg.txt
+claude_memory.md
+context_final.md
+flowchart.txt
+models.txt
+verify_schema.sql
